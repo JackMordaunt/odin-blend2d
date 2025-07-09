@@ -1,0 +1,48 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+
+jobs:
+  build_windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/checkout@v4
+
+      - name: Build bindgen
+        run: odin build src -out:bindgen.exe -vet -strict-style
+      
+      - name: Raylib
+        run: |
+          .\bindgen.exe examples/raylib
+          odin build examples/raylib/test
+
+      - name: Box2D 
+        run: |
+          .\bindgen.exe examples/box2d
+          odin build examples/box2d/test
+
+      - name: pdfio
+        run: |
+          .\bindgen.exe examples/pdfio
+          cd examples/pdfio/test
+          copy ..\pdfio\pdfio1.dll .
+          copy ..\pdfio\zlib.dll .
+          odin run .
+
+      - name: ufbx
+        run: |
+          .\bindgen.exe examples/ufbx
+          odin build examples/ufbx/test
+
