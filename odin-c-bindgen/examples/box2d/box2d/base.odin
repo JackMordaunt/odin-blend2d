@@ -2,44 +2,20 @@
 // SPDX-License-Identifier: MIT
 package box2d
 
-import "core:c"
-
-_ :: c
-
 foreign import lib "box2d.lib"
-
-// API :: BOX2D_EXPORT
-// INLINE :: static inline
+_ :: lib
 
 /// Prototype for user allocation function
 /// @param size the allocation size in bytes
 /// @param alignment the required alignment, guaranteed to be a power of 2
-AllocFcn :: proc "c" (c.uint, c.int) -> rawptr
+AllocFcn :: proc "c" (size: u32, alignment: i32) -> rawptr
 
 /// Prototype for user free function
 /// @param mem the memory previously allocated through `b2AllocFcn`
-FreeFcn :: proc "c" (rawptr)
+FreeFcn :: proc "c" (mem: rawptr)
 
 /// Prototype for the user assert callback. Return 0 to skip the debugger break.
-AssertFcn :: proc "c" (cstring, cstring, c.int) -> c.int
-
-// BREAKPOINT :: _debugbreak()
-
-/// Version numbering scheme.
-/// See https://semver.org/
-Version :: struct {
-	/// Significant changes
-	major: c.int,
-
-	/// Incremental changes
-	minor: c.int,
-
-	/// Bug fixes
-	revision: c.int,
-}
-
-/// Simple djb2 hash function for determinism testing
-HASH_INIT :: 5381
+AssertFcn :: proc "c" (condition: cstring, fileName: cstring, lineNumber: i32) -> i32
 
 @(default_calling_convention="c", link_prefix="b2")
 foreign lib {
@@ -48,13 +24,29 @@ foreign lib {
 	SetAllocator :: proc(allocFcn: AllocFcn, freeFcn: FreeFcn) ---
 
 	/// @return the total bytes allocated by Box2D
-	GetByteCount :: proc() -> c.int ---
+	GetByteCount :: proc() -> i32 ---
 
 	/// Override the default assert callback
 	/// @param assertFcn a non-null assert callback
 	SetAssertFcn      :: proc(assertFcn: AssertFcn) ---
-	InternalAssertFcn :: proc(condition: cstring, fileName: cstring, lineNumber: c.int) -> c.int ---
+	InternalAssertFcn :: proc(condition: cstring, fileName: cstring, lineNumber: i32) -> i32 ---
+}
 
+/// Version numbering scheme.
+/// See https://semver.org/
+Version :: struct {
+	/// Significant changes
+	major: i32,
+
+	/// Incremental changes
+	minor: i32,
+
+	/// Bug fixes
+	revision: i32,
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Get the current version of Box2D
 	GetVersion :: proc() -> Version ---
 
@@ -69,5 +61,13 @@ foreign lib {
 
 	/// Yield to be used in a busy loop.
 	Yield :: proc() ---
-	Hash  :: proc(hash: u32, data: ^u8, count: c.int) -> u32 ---
 }
+
+/// Simple djb2 hash function for determinism testing
+HASH_INIT :: 5381
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
+	Hash :: proc(hash: u32, data: ^u8, count: i32) -> u32 ---
+}
+

@@ -1,6 +1,11 @@
 *.pdb
 *.rdi
 *.exe
-*debug_dump.json
-*macro_dump.h
 scrap
+compile_examples.bat
+.vscode
+libclang.dll
+libclang/libclang.lib
+**/_output
+src/examples/tester/tester/*
+*.sublime-workspace
