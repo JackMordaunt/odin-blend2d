@@ -2,19 +2,16 @@
 // SPDX-License-Identifier: MIT
 package box2d
 
-import "core:c"
-
-_ :: c
-
 foreign import lib "box2d.lib"
+_ :: lib
 
 /**
- * @defgroup geometry Geometry
- * @brief Geometry types and algorithms
- *
- * Definitions of circles, capsules, segments, and polygons. Various algorithms to compute hulls, mass properties, and so on.
- * @{
- */
+* @defgroup geometry Geometry
+* @brief Geometry types and algorithms
+*
+* Definitions of circles, capsules, segments, and polygons. Various algorithms to compute hulls, mass properties, and so on.
+* @{
+*/
 
 /// The maximum number of vertices on a convex polygon. Changing this affects performance even if you
 /// don't use more vertices.
@@ -40,7 +37,7 @@ ShapeCastInput :: struct {
 	points: [8]Vec2,
 
 	/// The number of points
-	count: c.int,
+	count: i32,
 
 	/// The radius around the point cloud
 	radius: f32,
@@ -64,7 +61,7 @@ CastOutput :: struct {
 	fraction: f32,
 
 	/// The number of iterations used
-	iterations: c.int,
+	iterations: i32,
 
 	/// Did the cast hit?
 	hit: bool,
@@ -124,7 +121,7 @@ Polygon :: struct {
 	radius: f32,
 
 	/// The number of polygon vertices
-	count: c.int,
+	count: i32,
 }
 
 /// A line segment with two-sided collision.
@@ -150,275 +147,8 @@ ChainSegment :: struct {
 	ghost2: Vec2,
 
 	/// The owning chain shape index (internal usage only)
-	chainId: c.int,
+	chainId: i32,
 }
-
-/// A convex hull. Used to create convex polygons.
-/// @warning Do not modify these values directly, instead use b2ComputeHull()
-Hull :: struct {
-	/// The final points of the hull
-	points: [8]Vec2,
-
-	/// The number of points
-	count: c.int,
-}
-
-/// Result of computing the distance between two line segments
-SegmentDistanceResult :: struct {
-	/// The closest point on the first segment
-	closest1: Vec2,
-
-	/// The closest point on the second segment
-	closest2: Vec2,
-
-	/// The barycentric coordinate on the first segment
-	fraction1: f32,
-
-	/// The barycentric coordinate on the second segment
-	fraction2: f32,
-
-	/// The squared distance between the closest points
-	distanceSquared: f32,
-}
-
-/// A distance proxy is used by the GJK algorithm. It encapsulates any shape.
-ShapeProxy :: struct {
-	/// The point cloud
-	points: [8]Vec2,
-
-	/// The number of points
-	count: c.int,
-
-	/// The external radius of the point cloud
-	radius: f32,
-}
-
-/// Used to warm start the GJK simplex. If you call this function multiple times with nearby
-/// transforms this might improve performance. Otherwise you can zero initialize this.
-/// The distance cache must be initialized to zero on the first call.
-/// Users should generally just zero initialize this structure for each call.
-SimplexCache :: struct {
-	/// The number of stored simplex points
-	count: u16,
-
-	/// The cached simplex indices on shape A
-	indexA: [3]u8,
-
-	/// The cached simplex indices on shape B
-	indexB: [3]u8,
-}
-
-/// Input for b2ShapeDistance
-DistanceInput :: struct {
-	/// The proxy for shape A
-	proxyA: ShapeProxy,
-
-	/// The proxy for shape B
-	proxyB: ShapeProxy,
-
-	/// The world transform for shape A
-	transformA: Transform,
-
-	/// The world transform for shape B
-	transformB: Transform,
-
-	/// Should the proxy radius be considered?
-	useRadii: bool,
-}
-
-/// Output for b2ShapeDistance
-DistanceOutput :: struct {
-	pointA:       Vec2,  ///< Closest point on shapeA
-	pointB:       Vec2,  ///< Closest point on shapeB
-	distance:     f32,   ///< The final distance, zero if overlapped
-	iterations:   c.int, ///< Number of GJK iterations used
-	simplexCount: c.int, ///< The number of simplexes stored in the simplex array
-}
-
-/// Simplex vertex for debugging the GJK algorithm
-SimplexVertex :: struct {
-	wA:     Vec2,  ///< support point in proxyA
-	wB:     Vec2,  ///< support point in proxyB
-	w:      Vec2,  ///< wB - wA
-	a:      f32,   ///< barycentric coordinate for closest point
-	indexA: c.int, ///< wA index
-	indexB: c.int, ///< wB index
-}
-
-/// Simplex from the GJK algorithm
-Simplex :: struct {
-	v1, v2, v3: SimplexVertex, ///< vertices
-	count:      c.int,         ///< number of valid vertices
-}
-
-/// Input parameters for b2ShapeCast
-ShapeCastPairInput :: struct {
-	proxyA:       ShapeProxy, ///< The proxy for shape A
-	proxyB:       ShapeProxy, ///< The proxy for shape B
-	transformA:   Transform,  ///< The world transform for shape A
-	transformB:   Transform,  ///< The world transform for shape B
-	translationB: Vec2,       ///< The translation of shape B
-	maxFraction:  f32,        ///< The fraction of the translation to consider, typically 1
-}
-
-/// This describes the motion of a body/shape for TOI computation. Shapes are defined with respect to the body origin,
-/// which may not coincide with the center of mass. However, to support dynamics we must interpolate the center of mass
-/// position.
-Sweep :: struct {
-	localCenter: Vec2, ///< Local center of mass position
-	c1:          Vec2, ///< Starting center of mass world position
-	c2:          Vec2, ///< Ending center of mass world position
-	q1:          Rot,  ///< Starting world rotation
-	q2:          Rot,  ///< Ending world rotation
-}
-
-/// Input parameters for b2TimeOfImpact
-TOIInput :: struct {
-	proxyA:      ShapeProxy, ///< The proxy for shape A
-	proxyB:      ShapeProxy, ///< The proxy for shape B
-	sweepA:      Sweep,      ///< The movement of shape A
-	sweepB:      Sweep,      ///< The movement of shape B
-	maxFraction: f32,        ///< Defines the sweep interval [0, maxFraction]
-}
-
-/// Describes the TOI output
-TOIState :: enum c.int {
-	Unknown,
-	Failed,
-	Overlapped,
-	Hit,
-	Separated,
-}
-
-/// Output parameters for b2TimeOfImpact.
-TOIOutput :: struct {
-	state:    TOIState, ///< The type of result
-	fraction: f32,      ///< The sweep time of the collision
-}
-
-/// A manifold point is a contact point belonging to a contact manifold.
-/// It holds details related to the geometry and dynamics of the contact points.
-/// Box2D uses speculative collision so some contact points may be separated.
-/// You may use the maxNormalImpulse to determine if there was an interaction during
-/// the time step.
-ManifoldPoint :: struct {
-	/// Location of the contact point in world space. Subject to precision loss at large coordinates.
-	/// @note Should only be used for debugging.
-	point: Vec2,
-
-	/// Location of the contact point relative to shapeA's origin in world space
-	/// @note When used internally to the Box2D solver, this is relative to the body center of mass.
-	anchorA: Vec2,
-
-	/// Location of the contact point relative to shapeB's origin in world space
-	/// @note When used internally to the Box2D solver, this is relative to the body center of mass.
-	anchorB: Vec2,
-
-	/// The separation of the contact point, negative if penetrating
-	separation: f32,
-
-	/// The impulse along the manifold normal vector.
-	normalImpulse: f32,
-
-	/// The friction impulse
-	tangentImpulse: f32,
-
-	/// The maximum normal impulse applied during sub-stepping. This is important
-	/// to identify speculative contact points that had an interaction in the time step.
-	maxNormalImpulse: f32,
-
-	/// Relative normal velocity pre-solve. Used for hit events. If the normal impulse is
-	/// zero then there was no hit. Negative means shapes are approaching.
-	normalVelocity: f32,
-
-	/// Uniquely identifies a contact point between two shapes
-	id: u16,
-
-	/// Did this contact point exist the previous step?
-	persisted: bool,
-}
-
-/// A contact manifold describes the contact points between colliding shapes.
-/// @note Box2D uses speculative collision so some contact points may be separated.
-Manifold :: struct {
-	/// The unit normal vector in world space, points from shape A to bodyB
-	normal: Vec2,
-
-	/// Angular impulse applied for rolling resistance. N * m * s = kg * m^2 / s
-	rollingImpulse: f32,
-
-	/// The manifold points, up to two are possible in 2D
-	points: [2]ManifoldPoint,
-
-	/// The number of contacts points, will be 0, 1, or 2
-	pointCount: c.int,
-}
-
-/// The dynamic tree structure. This should be considered private data.
-/// It is placed here for performance reasons.
-TreeNode :: struct {}
-
-DynamicTree :: struct {
-	/// The tree nodes
-	nodes: [^]TreeNode,
-
-	/// The root index
-	root: c.int,
-
-	/// The number of nodes
-	nodeCount: c.int,
-
-	/// The allocated node space
-	nodeCapacity: c.int,
-
-	/// Node free list
-	freeList: c.int,
-
-	/// Number of proxies created
-	proxyCount: c.int,
-
-	/// Leaf indices for rebuild
-	leafIndices: ^c.int,
-
-	/// Leaf bounding boxes for rebuild
-	leafBoxes: ^AABB,
-
-	/// Leaf bounding box centers for rebuild
-	leafCenters: ^Vec2,
-
-	/// Bins for sorting during rebuild
-	binIndices: ^c.int,
-
-	/// Allocated space for rebuilding
-	rebuildCapacity: c.int,
-}
-
-/// These are performance results returned by dynamic tree queries.
-TreeStats :: struct {
-	/// Number of internal nodes visited during the query
-	nodeVisits: c.int,
-
-	/// Number of leaf nodes visited during the query
-	leafVisits: c.int,
-}
-
-/// This function receives proxies found in the AABB query.
-/// @return true if the query should continue
-TreeQueryCallbackFcn :: proc "c" (c.int, c.int, rawptr) -> bool
-
-/// This function receives clipped ray cast input for a proxy. The function
-/// returns the new ray fraction.
-/// - return a value of 0 to terminate the ray cast
-/// - return a value less than input->maxFraction to clip the ray
-/// - return a value of input->maxFraction to continue the ray cast without clipping
-TreeRayCastCallbackFcn :: proc "c" (^RayCastInput, c.int, c.int, rawptr) -> f32
-
-/// This function receives clipped ray cast input for a proxy. The function
-/// returns the new ray fraction.
-/// - return a value of 0 to terminate the ray cast
-/// - return a value less than input->maxFraction to clip the ray
-/// - return a value of input->maxFraction to continue the ray cast without clipping
-TreeShapeCastCallbackFcn :: proc "c" (^ShapeCastInput, c.int, c.int, rawptr) -> f32
 
 @(default_calling_convention="c", link_prefix="b2")
 foreign lib {
@@ -524,7 +254,20 @@ foreign lib {
 
 	/// Shape cast versus a convex polygon. Initial overlap is treated as a miss.
 	ShapeCastPolygon :: proc(input: ^ShapeCastInput, shape: ^Polygon) -> CastOutput ---
+}
 
+/// A convex hull. Used to create convex polygons.
+/// @warning Do not modify these values directly, instead use b2ComputeHull()
+Hull :: struct {
+	/// The final points of the hull
+	points: [8]Vec2,
+
+	/// The number of points
+	count: i32,
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Compute the convex hull of a set of points. Returns an empty hull if it fails.
 	/// Some failure cases:
 	/// - all points very close together
@@ -533,37 +276,246 @@ foreign lib {
 	/// - more than B2_MAX_POLYGON_VERTICES points
 	/// This welds close points and removes collinear points.
 	/// @warning Do not modify a hull once it has been computed
-	ComputeHull :: proc(points: ^Vec2, count: c.int) -> Hull ---
+	ComputeHull :: proc(points: ^Vec2, count: i32) -> Hull ---
 
 	/// This determines if a hull is valid. Checks for:
 	/// - convexity
 	/// - collinear points
 	/// This is expensive and should not be called at runtime.
 	ValidateHull :: proc(hull: ^Hull) -> bool ---
+}
 
+/// Result of computing the distance between two line segments
+SegmentDistanceResult :: struct {
+	/// The closest point on the first segment
+	closest1: Vec2,
+
+	/// The closest point on the second segment
+	closest2: Vec2,
+
+	/// The barycentric coordinate on the first segment
+	fraction1: f32,
+
+	/// The barycentric coordinate on the second segment
+	fraction2: f32,
+
+	/// The squared distance between the closest points
+	distanceSquared: f32,
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Compute the distance between two line segments, clamping at the end points if needed.
 	SegmentDistance :: proc(p1: Vec2, q1: Vec2, p2: Vec2, q2: Vec2) -> SegmentDistanceResult ---
+}
 
+/// A distance proxy is used by the GJK algorithm. It encapsulates any shape.
+ShapeProxy :: struct {
+	/// The point cloud
+	points: [8]Vec2,
+
+	/// The number of points
+	count: i32,
+
+	/// The external radius of the point cloud
+	radius: f32,
+}
+
+/// Used to warm start the GJK simplex. If you call this function multiple times with nearby
+/// transforms this might improve performance. Otherwise you can zero initialize this.
+/// The distance cache must be initialized to zero on the first call.
+/// Users should generally just zero initialize this structure for each call.
+SimplexCache :: struct {
+	/// The number of stored simplex points
+	count: u16,
+
+	/// The cached simplex indices on shape A
+	indexA: [3]u8,
+
+	/// The cached simplex indices on shape B
+	indexB: [3]u8,
+}
+
+/// Input for b2ShapeDistance
+DistanceInput :: struct {
+	/// The proxy for shape A
+	proxyA: ShapeProxy,
+
+	/// The proxy for shape B
+	proxyB: ShapeProxy,
+
+	/// The world transform for shape A
+	transformA: Transform,
+
+	/// The world transform for shape B
+	transformB: Transform,
+
+	/// Should the proxy radius be considered?
+	useRadii: bool,
+}
+
+/// Output for b2ShapeDistance
+DistanceOutput :: struct {
+	pointA:       Vec2, ///< Closest point on shapeA
+	pointB:       Vec2, ///< Closest point on shapeB
+	distance:     f32,  ///< The final distance, zero if overlapped
+	iterations:   i32,  ///< Number of GJK iterations used
+	simplexCount: i32,  ///< The number of simplexes stored in the simplex array
+}
+
+/// Simplex vertex for debugging the GJK algorithm
+SimplexVertex :: struct {
+	wA:     Vec2, ///< support point in proxyA
+	wB:     Vec2, ///< support point in proxyB
+	w:      Vec2, ///< wB - wA
+	a:      f32,  ///< barycentric coordinate for closest point
+	indexA: i32,  ///< wA index
+	indexB: i32,  ///< wB index
+}
+
+/// Simplex from the GJK algorithm
+Simplex :: struct {
+	v1, v2, v3: SimplexVertex, ///< vertices
+	count:      i32,           ///< number of valid vertices
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Compute the closest points between two shapes represented as point clouds.
 	/// b2SimplexCache cache is input/output. On the first call set b2SimplexCache.count to zero.
 	/// The underlying GJK algorithm may be debugged by passing in debug simplexes and capacity. You may pass in NULL and 0 for these.
-	ShapeDistance :: proc(cache: ^SimplexCache, input: ^DistanceInput, simplexes: ^Simplex, simplexCapacity: c.int) -> DistanceOutput ---
+	ShapeDistance :: proc(cache: ^SimplexCache, input: ^DistanceInput, simplexes: ^Simplex, simplexCapacity: i32) -> DistanceOutput ---
+}
 
+/// Input parameters for b2ShapeCast
+ShapeCastPairInput :: struct {
+	proxyA:       ShapeProxy, ///< The proxy for shape A
+	proxyB:       ShapeProxy, ///< The proxy for shape B
+	transformA:   Transform,  ///< The world transform for shape A
+	transformB:   Transform,  ///< The world transform for shape B
+	translationB: Vec2,       ///< The translation of shape B
+	maxFraction:  f32,        ///< The fraction of the translation to consider, typically 1
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Perform a linear shape cast of shape B moving and shape A fixed. Determines the hit point, normal, and translation fraction.
 	ShapeCast :: proc(input: ^ShapeCastPairInput) -> CastOutput ---
 
 	/// Make a proxy for use in GJK and related functions.
-	MakeProxy :: proc(vertices: ^Vec2, count: c.int, radius: f32) -> ShapeProxy ---
+	MakeProxy :: proc(vertices: ^Vec2, count: i32, radius: f32) -> ShapeProxy ---
+}
 
+/// This describes the motion of a body/shape for TOI computation. Shapes are defined with respect to the body origin,
+/// which may not coincide with the center of mass. However, to support dynamics we must interpolate the center of mass
+/// position.
+Sweep :: struct {
+	localCenter: Vec2, ///< Local center of mass position
+	c1:          Vec2, ///< Starting center of mass world position
+	c2:          Vec2, ///< Ending center of mass world position
+	q1:          Rot,  ///< Starting world rotation
+	q2:          Rot,  ///< Ending world rotation
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Evaluate the transform sweep at a specific time.
 	GetSweepTransform :: proc(sweep: ^Sweep, time: f32) -> Transform ---
+}
 
+/// Input parameters for b2TimeOfImpact
+TOIInput :: struct {
+	proxyA:      ShapeProxy, ///< The proxy for shape A
+	proxyB:      ShapeProxy, ///< The proxy for shape B
+	sweepA:      Sweep,      ///< The movement of shape A
+	sweepB:      Sweep,      ///< The movement of shape B
+	maxFraction: f32,        ///< Defines the sweep interval [0, maxFraction]
+}
+
+/// Describes the TOI output
+TOIState :: enum i32 {
+	Unknown    = 0,
+	Failed     = 1,
+	Overlapped = 2,
+	Hit        = 3,
+	Separated  = 4,
+}
+
+/// Output parameters for b2TimeOfImpact.
+TOIOutput :: struct {
+	state:    TOIState, ///< The type of result
+	fraction: f32,      ///< The sweep time of the collision
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Compute the upper bound on time before two shapes penetrate. Time is represented as
 	/// a fraction between [0,tMax]. This uses a swept separating axis and may miss some intermediate,
 	/// non-tunneling collisions. If you change the time interval, you should call this function
 	/// again.
 	TimeOfImpact :: proc(input: ^TOIInput) -> TOIOutput ---
+}
 
+/// A manifold point is a contact point belonging to a contact manifold.
+/// It holds details related to the geometry and dynamics of the contact points.
+/// Box2D uses speculative collision so some contact points may be separated.
+/// You may use the maxNormalImpulse to determine if there was an interaction during
+/// the time step.
+ManifoldPoint :: struct {
+	/// Location of the contact point in world space. Subject to precision loss at large coordinates.
+	/// @note Should only be used for debugging.
+	point: Vec2,
+
+	/// Location of the contact point relative to shapeA's origin in world space
+	/// @note When used internally to the Box2D solver, this is relative to the body center of mass.
+	anchorA: Vec2,
+
+	/// Location of the contact point relative to shapeB's origin in world space
+	/// @note When used internally to the Box2D solver, this is relative to the body center of mass.
+	anchorB: Vec2,
+
+	/// The separation of the contact point, negative if penetrating
+	separation: f32,
+
+	/// The impulse along the manifold normal vector.
+	normalImpulse: f32,
+
+	/// The friction impulse
+	tangentImpulse: f32,
+
+	/// The maximum normal impulse applied during sub-stepping. This is important
+	/// to identify speculative contact points that had an interaction in the time step.
+	maxNormalImpulse: f32,
+
+	/// Relative normal velocity pre-solve. Used for hit events. If the normal impulse is
+	/// zero then there was no hit. Negative means shapes are approaching.
+	normalVelocity: f32,
+
+	/// Uniquely identifies a contact point between two shapes
+	id: u16,
+
+	/// Did this contact point exist the previous step?
+	persisted: bool,
+}
+
+/// A contact manifold describes the contact points between colliding shapes.
+/// @note Box2D uses speculative collision so some contact points may be separated.
+Manifold :: struct {
+	/// The unit normal vector in world space, points from shape A to bodyB
+	normal: Vec2,
+
+	/// Angular impulse applied for rolling resistance. N * m * s = kg * m^2 / s
+	rollingImpulse: f32,
+
+	/// The manifold points, up to two are possible in 2D
+	points: [2]ManifoldPoint,
+
+	/// The number of contacts points, will be 0, 1, or 2
+	pointCount: i32,
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Compute the contact manifold between two circles
 	CollideCircles :: proc(circleA: ^Circle, xfA: Transform, circleB: ^Circle, xfB: Transform) -> Manifold ---
 
@@ -599,7 +551,58 @@ foreign lib {
 
 	/// Compute the contact manifold between a chain segment and a rounded polygon
 	CollideChainSegmentAndPolygon :: proc(segmentA: ^ChainSegment, xfA: Transform, polygonB: ^Polygon, xfB: Transform, cache: ^SimplexCache) -> Manifold ---
+}
 
+/// The dynamic tree structure. This should be considered private data.
+/// It is placed here for performance reasons.
+DynamicTree :: struct {
+	/// The tree nodes
+	nodes: [^]TreeNode,
+
+	/// The root index
+	root: i32,
+
+	/// The number of nodes
+	nodeCount: i32,
+
+	/// The allocated node space
+	nodeCapacity: i32,
+
+	/// Node free list
+	freeList: i32,
+
+	/// Number of proxies created
+	proxyCount: i32,
+
+	/// Leaf indices for rebuild
+	leafIndices: ^i32,
+
+	/// Leaf bounding boxes for rebuild
+	leafBoxes: ^AABB,
+
+	/// Leaf bounding box centers for rebuild
+	leafCenters: ^Vec2,
+
+	/// Bins for sorting during rebuild
+	binIndices: ^i32,
+
+	/// Allocated space for rebuilding
+	rebuildCapacity: i32,
+}
+
+TreeNode :: struct {}
+
+/// These are performance results returned by dynamic tree queries.
+TreeStats :: struct {
+	/// Number of internal nodes visited during the query
+	nodeVisits: i32,
+
+	/// Number of leaf nodes visited during the query
+	leafVisits: i32,
+}
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Constructing the tree initializes the node pool.
 	DynamicTree_Create :: proc() -> DynamicTree ---
 
@@ -607,21 +610,38 @@ foreign lib {
 	DynamicTree_Destroy :: proc(tree: ^DynamicTree) ---
 
 	/// Create a proxy. Provide an AABB and a userData value.
-	DynamicTree_CreateProxy :: proc(tree: ^DynamicTree, aabb: AABB, categoryBits: u64, userData: c.int) -> c.int ---
+	DynamicTree_CreateProxy :: proc(tree: ^DynamicTree, aabb: AABB, categoryBits: u64, userData: i32) -> i32 ---
 
 	/// Destroy a proxy. This asserts if the id is invalid.
-	DynamicTree_DestroyProxy :: proc(tree: ^DynamicTree, proxyId: c.int) ---
+	DynamicTree_DestroyProxy :: proc(tree: ^DynamicTree, proxyId: i32) ---
 
 	/// Move a proxy to a new AABB by removing and reinserting into the tree.
-	DynamicTree_MoveProxy :: proc(tree: ^DynamicTree, proxyId: c.int, aabb: AABB) ---
+	DynamicTree_MoveProxy :: proc(tree: ^DynamicTree, proxyId: i32, aabb: AABB) ---
 
 	/// Enlarge a proxy and enlarge ancestors as necessary.
-	DynamicTree_EnlargeProxy :: proc(tree: ^DynamicTree, proxyId: c.int, aabb: AABB) ---
+	DynamicTree_EnlargeProxy :: proc(tree: ^DynamicTree, proxyId: i32, aabb: AABB) ---
+}
 
+/// This function receives proxies found in the AABB query.
+/// @return true if the query should continue
+TreeQueryCallbackFcn :: proc "c" (proxyId: i32, userData: i32, _context: rawptr) -> bool
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Query an AABB for overlapping proxies. The callback class is called for each proxy that overlaps the supplied AABB.
 	///	@return performance data
 	DynamicTree_Query :: proc(tree: ^DynamicTree, aabb: AABB, maskBits: u64, callback: TreeQueryCallbackFcn, _context: rawptr) -> TreeStats ---
+}
 
+/// This function receives clipped ray cast input for a proxy. The function
+/// returns the new ray fraction.
+/// - return a value of 0 to terminate the ray cast
+/// - return a value less than input->maxFraction to clip the ray
+/// - return a value of input->maxFraction to continue the ray cast without clipping
+TreeRayCastCallbackFcn :: proc "c" (input: ^RayCastInput, proxyId: i32, userData: i32, _context: rawptr) -> f32
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Ray cast against the proxies in the tree. This relies on the callback
 	/// to perform a exact ray cast in the case were the proxy contains a shape.
 	/// The callback also performs the any collision filtering. This has performance
@@ -636,7 +656,17 @@ foreign lib {
 	/// @param context user context that is passed to the callback
 	///	@return performance data
 	DynamicTree_RayCast :: proc(tree: ^DynamicTree, input: ^RayCastInput, maskBits: u64, callback: TreeRayCastCallbackFcn, _context: rawptr) -> TreeStats ---
+}
 
+/// This function receives clipped ray cast input for a proxy. The function
+/// returns the new ray fraction.
+/// - return a value of 0 to terminate the ray cast
+/// - return a value less than input->maxFraction to clip the ray
+/// - return a value of input->maxFraction to continue the ray cast without clipping
+TreeShapeCastCallbackFcn :: proc "c" (input: ^ShapeCastInput, proxyId: i32, userData: i32, _context: rawptr) -> f32
+
+@(default_calling_convention="c", link_prefix="b2")
+foreign lib {
 	/// Ray cast against the proxies in the tree. This relies on the callback
 	/// to perform a exact ray cast in the case were the proxy contains a shape.
 	/// The callback also performs the any collision filtering. This has performance
@@ -651,25 +681,25 @@ foreign lib {
 	DynamicTree_ShapeCast :: proc(tree: ^DynamicTree, input: ^ShapeCastInput, maskBits: u64, callback: TreeShapeCastCallbackFcn, _context: rawptr) -> TreeStats ---
 
 	/// Get the height of the binary tree.
-	DynamicTree_GetHeight :: proc(tree: ^DynamicTree) -> c.int ---
+	DynamicTree_GetHeight :: proc(tree: ^DynamicTree) -> i32 ---
 
 	/// Get the ratio of the sum of the node areas to the root area.
 	DynamicTree_GetAreaRatio :: proc(tree: ^DynamicTree) -> f32 ---
 
 	/// Get the number of proxies created
-	DynamicTree_GetProxyCount :: proc(tree: ^DynamicTree) -> c.int ---
+	DynamicTree_GetProxyCount :: proc(tree: ^DynamicTree) -> i32 ---
 
 	/// Rebuild the tree while retaining subtrees that haven't changed. Returns the number of boxes sorted.
-	DynamicTree_Rebuild :: proc(tree: ^DynamicTree, fullBuild: bool) -> c.int ---
+	DynamicTree_Rebuild :: proc(tree: ^DynamicTree, fullBuild: bool) -> i32 ---
 
 	/// Get the number of bytes used by this tree
-	DynamicTree_GetByteCount :: proc(tree: ^DynamicTree) -> c.int ---
+	DynamicTree_GetByteCount :: proc(tree: ^DynamicTree) -> i32 ---
 
 	/// Get proxy user data
-	DynamicTree_GetUserData :: proc(tree: ^DynamicTree, proxyId: c.int) -> c.int ---
+	DynamicTree_GetUserData :: proc(tree: ^DynamicTree, proxyId: i32) -> i32 ---
 
 	/// Get the AABB of a proxy
-	DynamicTree_GetAABB :: proc(tree: ^DynamicTree, proxyId: c.int) -> AABB ---
+	DynamicTree_GetAABB :: proc(tree: ^DynamicTree, proxyId: i32) -> AABB ---
 
 	/// Validate this tree. For testing.
 	DynamicTree_Validate :: proc(tree: ^DynamicTree) ---
@@ -677,3 +707,4 @@ foreign lib {
 	/// Validate this tree has no enlarged AABBs. For testing.
 	DynamicTree_ValidateNoEnlarged :: proc(tree: ^DynamicTree) ---
 }
+
