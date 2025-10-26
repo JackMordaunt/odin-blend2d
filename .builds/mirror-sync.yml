@@ -1,0 +1,12 @@
+image: alpine/edge
+packages:
+  - git
+secrets:
+  - 1c238745-e2fe-4372-8682-c8b6929ffbcd
+tasks:
+  - sync: |
+      ssh-keyscan github.com >> ~/.ssh/known_hosts
+      git clone --mirror https://git.sr.ht/~jackmordaunt/odin-blend2d
+      cd odin-blend2d
+      git remote set-url --push origin git@github.com:jackmordaunt/odin-blend2d.git
+      git push --mirror
