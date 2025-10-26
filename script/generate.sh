@@ -2,13 +2,29 @@
 
 set -xeu
 
-odin build ./odin-c-bindgen/src -out:bindgen.bin
+# Build blend2d static lib.
+cmake -S blend2d -B .build -DCMAKE_BUILD_TYPE=Release -DBLEND2D_STATIC=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build .build --config Release --parallel 4
 
-mkdir -p binding
 
-cp ./blend2d/src/blend2d.h ./binding/
-cp -r ./blend2d/src/blend2d ./binding/
+# Copy public headers (blend2d uses _p to indicate "private").
+rm -r .headers || true
+mkdir -p .headers
+fd -e .h -E "*_p.h" . blend2d/src/blend2d | xargs -I {} cp {} .headers/
 
-./bindgen.bin ./binding
+# Export libclang for bindgen to link to.
+export LIBRARY_PATH=$(llvm-config --libdir)
+export CPATH=$(llvm-config --includedir)
 
-cat ./binding/binding/blend2d.odin
+# Generate bindings.
+rm -r ./binding || true
+odin run ./odin-c-bindgen/src -out:bindgen.bin -- .
+
+# Copy static lib to binding folder.
+cp .build/{blend2d.lib,libblend2d.a} ./binding 2>/dev/null || true
+
+# Apply custom patches.
+# This is required only because bindgen is a bit naive, duplicating
+# symbols and it misses a symbol.
+patch -p1 binding/api.odin patch/api.odin.patch
+patch -p1 binding/object.odin patch/object.odin.patch
