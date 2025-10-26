@@ -1,10 +1,22 @@
-clang_include_paths = [
-	"blend2d/src"
+inputs = [
+	".headers"
 ]
 
+remove = [
+	// The version macro doesn't translate.
+	"BL_VERSION"
+]
 
-// Writes the clang JSON ast dump for debug inspection (in output folder)
-debug_dump_json_ast = true
+type_overrides = {
+	// BLRuntimeContext contains cpp fields that don't translate.
+	"BLRuntimeContext" = "struct{}"
+}
 
-// Writes the clang preprocessor macro dump
-debug_dump_macros = true
+remove_type_prefix = "BL"
+remove_function_prefix = "bl_"
+remove_macro_prefix = "BL_"
+
+output_folder = "binding"
+package_name = "blend2d"
+
+imports_file = "imports.inc"
