@@ -1,0 +1,10 @@
+--- binding/object.odin	2025-10-25 22:52:47.970068163 -0300
++++ patch/object.odin	2025-10-25 22:56:46.076923967 -0300
+@@ -14,6 +14,7 @@
+ 	foreign import lib "libblend2d.a"
+ }
+ 
++ObjectImpl :: struct {}
+ 
+ //! \cond INTERNAL
+ //! Defines a start offset of each field or flag in object info - the shift can be then used to get/set value from/to
