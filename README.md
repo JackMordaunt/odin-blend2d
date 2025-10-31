@@ -14,11 +14,11 @@ Features:
 
 ## Requirements
 - Odin
-- libclang
+- libclang version 16 or higher
 	- On Windows: Download libclang 20.1.8 from here: https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/clang+llvm-20.1.8-x86_64-pc-windows-msvc.tar.xz -- Copy the following from that archive:
 		- `lib/libclang.lib` into the generator's 'libclang' folder
 		- `bin/libclang.dll` into the root of the generator (next to where the bindgen executable will end up).
-	- On Linux/mac, please install libclang. For example using `apt install libclang-dev` on Ubuntu/Debian/Mint. It doesn't have to be version 20, I've tried it with as low as version 18.
+	- On Linux/mac, please install libclang. For example using `apt install libclang-dev` on Ubuntu/Debian/Mint. Anything from clang version 16 and new should work.
 
 > [!NOTE]
 > libclang is used for analysing the C headers and deciding what Odin code to output.
@@ -58,6 +58,9 @@ remove_macro_prefix = ""
 // Remove this prefix from function names (and add it as link_prefix) to the foreign group
 remove_function_prefix = ""
 
+// Remove this suffix from type names (such as '_t' etc)
+remove_type_suffix = ""
+
 // Set to true translate type names to Ada_Case
 force_ada_case_types = false
 
@@ -77,10 +80,12 @@ rename = {
 }
 
 // Turns an enum into a bit_set. Converts the values of the enum into appropriate values for a
-// bit_set. Creates a bit_set type that uses the enum. Properly removes enum values with value 0.
-// Translates the enum values using a log2 procedure.
+// bit_set (translates the enum values using a log2 procedure).
+//
+// Note that the enum will be turned into a bit_set type. There will be a new type created that
+// contains the actual enum, which the bit_set then references.
 bit_setify = {
-	// "Pre_Existing_Enum_Type" = "New_Bit_Set_Type"
+	// "Enum_To_Turn_Into_Bitset" = "New_Enum_Type_Name"
 }
 
 // Completely override the definition of a type.
