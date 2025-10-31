@@ -6,15 +6,15 @@ set -xeu
 cmake -S blend2d -B .build -DCMAKE_BUILD_TYPE=Release -DBLEND2D_STATIC=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build .build --config Release --parallel 4
 
-
 # Copy public headers (blend2d uses _p to indicate "private").
 rm -r .headers || true
 mkdir -p .headers
 fd -e .h -E "*_p.h" . blend2d/src/blend2d | xargs -I {} cp {} .headers/
 
-# Export libclang for bindgen to link to.
-export LIBRARY_PATH=$(llvm-config --libdir)
-export CPATH=$(llvm-config --includedir)
+# On macOS, set SDKROOT so that brew versions of libclang can find system headers.
+if [[ "$(uname)" == "Darwin" ]]; then
+  export SDKROOT=$(xcrun --show-sdk-path)
+fi
 
 # Generate bindings.
 rm -r ./binding || true
