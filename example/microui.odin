@@ -1,88 +1,624 @@
+/*
+	This example showcases Blend2d as the rendering backend for microui, using SDL
+	as the cross platform graphics API.
+
+	SDL is used to create the OS window and provide a rendering context.
+	Blend2d draws directly into the pixel buffer of an SDL GPU texture.
+	microui is used to implement the UI layout.
+
+	SDL events -> microui
+	microui -> render commands -> Blend2d
+	Blend2d -> GPU texture
+
+	You can also render microui using SDL drawing primitives, but the point is
+	to use Blend2d to do rendering on the CPU.
+
+	Bugs:
+		- log text input not working
+		- clips are too aggressive on paths (text + icons)
+*/
 package main
 
+import "core:c"
+
+import "base:runtime"
 import "core:fmt"
-import "core:thread"
+import "core:math"
+import "core:mem/virtual"
+import "core:strings"
 
 import bl "../binding"
 import mu "vendor:microui"
 import sdl "vendor:sdl3"
 
-//todo need windowing lib
-// SDL3
-// tigr (neess bindings)
-// glfw
-//todo user input
-// font loading
+// FontHandle is provided to microui, allowing access to the context within text
+// measuring callbacks.
+FontHandle :: struct {
+	ctx:  ^Context,
+	font: ^bl.FontCore,
+}
+
+// Context is an amalgam of state required by SDL, microui, blend2d and the ui logic.
 Context :: struct {
+	runtime_context: runtime.Context,
 	mu_ctx:          ^mu.Context,
 	bl_ctx:          ^bl.ContextCore,
+	face:            ^bl.FontFaceCore,
+	font:            ^bl.FontCore,
+	window:          ^sdl.Window,
+	renderer:        ^sdl.Renderer,
+	texture:         ^sdl.Texture,
+	bg:              mu.Color,
+	cookie:          bl.ContextCookie,
 	log_buf:         [1 << 16]byte,
 	log_buf_len:     int,
 	log_buf_updated: bool,
-	bg:              mu.Color,
+	frame_count:     i64,
+	render_width:    i32,
+	render_height:   i32,
+	logical_width:   i32,
+	logical_height:  i32,
+	scale:           i32,
+	debug_text:      bool,
 }
 
+// context_init initializes SDL, blend2d and microui.
 context_init :: proc(ctx: ^Context) {
+	ctx.runtime_context = context
+
 	ctx.bl_ctx = new(bl.ContextCore)
-	bl.context_init(ctx.bl_ctx)
+
+	if bl.context_init(ctx.bl_ctx) != 0 {
+		panic("failed to create blend2d context")
+	}
+
 	ctx.mu_ctx = new(mu.Context)
 	mu.init(ctx.mu_ctx)
-}
-
-main :: proc() {
-	ctx: Context
-
-	context_init(&ctx)
 
 	assert(sdl.Init({.VIDEO, .EVENTS}))
 
+	display_mode := sdl.GetCurrentDisplayMode(sdl.GetPrimaryDisplay())
+	ctx.scale = i32(display_mode.pixel_density)
+
 	window := sdl.CreateWindow(
 		"microui - blend2d - sdl3",
-		800,
-		800,
-		{.HIGH_PIXEL_DENSITY, .RESIZABLE},
+		WINDOW_WIDTH,
+		WINDOW_HEIGHT,
+		{.RESIZABLE, .HIGH_PIXEL_DENSITY},
 	)
 
-	// NOTE: mus tbe requeried if window is resized.
-	surface := sdl.GetWindowSurface(window)
+	ctx.window = window
 
-	print_sdl_pixel_format(surface.format)
+	renderer := sdl.CreateRenderer(window, "")
 
-	// img: bl.ImageCore
+	ctx.renderer = renderer
 
-	// bl.image_init(&img)
-	// bl.image_create(&img, 480, 480, .PRGB32)
+	sdl.GetRenderOutputSize(renderer, &ctx.render_width, &ctx.render_height)
 
-	// for {
-	// 	defer thread.yield()
-	// 	mu.begin(ctx.mu_ctx)
-	// 	all_windows(&ctx)
-	// 	mu.end(ctx.mu_ctx)
-	// 	render(&ctx)
-	// }
+	texture := sdl.CreateTexture(
+		renderer,
+		.RGBA32,
+		.STREAMING,
+		ctx.render_width,
+		ctx.render_height,
+	)
+	ctx.texture = texture
+
+	sdl.SetTextureBlendMode(
+		texture,
+		sdl.ComposeCustomBlendMode(
+			.ONE,
+			.ONE_MINUS_SRC_ALPHA,
+			.ADD,
+			.ONE,
+			.ONE_MINUS_SRC_ALPHA,
+			.ADD,
+		),
+	)
+
+	sdl.SetRenderVSync(renderer, 1)
+
+	window_scale := sdl.GetWindowDisplayScale(ctx.window)
+	window_pixel_density := sdl.GetWindowPixelDensity(ctx.window)
+	sdl.GetRenderOutputSize(ctx.renderer, &ctx.render_width, &ctx.render_height)
+
+	/*
+		init font
+	*/
+
+	{
+		ctx.face = new(bl.FontFaceCore)
+		bl.font_face_init(ctx.face)
+
+		if bl.font_face_create_from_file(
+			   ctx.face,
+			   "./example/resource/Roboto-Medium.ttf",
+			   .NO_FLAGS,
+		   ) !=
+		   0 {
+			panic("failed to load font")
+		}
+
+		ctx.font = new(bl.FontCore)
+		assert(bl.font_init(ctx.font) == 0)
+
+		assert(bl.font_create_from_face(ctx.font, ctx.face, f32(14 * ctx.scale)) == 0)
+
+		// Setup the font handle. Provides access to the context in the text measuring
+		// callbacks.
+		fh := new(FontHandle)
+		fh.ctx = ctx
+		fh.font = ctx.font
+		ctx.mu_ctx.style.font = mu.Font(fh)
+
+		ctx.mu_ctx.text_height = proc(font: mu.Font) -> i32 {
+			if font == nil {
+				return 0
+			}
+
+			fh := cast(^FontHandle)(font)
+
+			fm: bl.FontMetrics
+			bl.font_get_metrics(fh.font, &fm)
+
+			height := i32(fm.ascent + fm.descent)
+
+			// The font measurements need to be unscaled because microui
+			// works within a logical coordinate space.
+			return height / fh.ctx.scale
+		}
+
+		ctx.mu_ctx.text_width = proc(font: mu.Font, text: string) -> i32 {
+			if font == nil {
+				return 0
+			}
+
+			fh := cast(^FontHandle)(font)
+
+			@(static) gb: bl.GlyphBufferCore
+			bl.glyph_buffer_init(&gb)
+			defer bl.glyph_buffer_reset(&gb)
+
+			bl.glyph_buffer_set_text(&gb, raw_data(text), len(text), .UTF8)
+
+			tm: bl.TextMetrics
+			bl.font_get_text_metrics(fh.font, &gb, &tm)
+
+			// The font measurements need to be unscaled because microui
+			// works within a logical coordinate space.
+			return i32(tm.advance.x) / fh.ctx.scale
+		}
+	}
+}
+
+WINDOW_WIDTH :: 800
+WINDOW_HEIGHT :: 800
+
+main :: proc() {
+	ctx: Context
+	context_init(&ctx)
+
+	arena: virtual.Arena
+	assert(virtual.arena_init_growing(&arena) == nil)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	sdl.GetWindowSize(ctx.window, &ctx.logical_width, &ctx.logical_height)
+
+	mainloop: for {
+		defer virtual.arena_free_all(&arena)
+		defer ctx.frame_count += 1
+
+		event: sdl.Event
+
+		for sdl.PollEvent(&event) {
+			#partial switch event.type {
+			case .QUIT:
+				break mainloop
+			case .MOUSE_MOTION:
+				mu.input_mouse_move(
+					ctx.mu_ctx,
+					i32(math.round(event.motion.x)),
+					i32(math.round(event.motion.y)),
+				)
+			case .MOUSE_BUTTON_DOWN:
+				if btn := sdl_button_to_mu_button(event.button.button); btn != nil {
+					mu.input_mouse_down(
+						ctx.mu_ctx,
+						i32(math.round(event.button.x)),
+						i32(math.round(event.button.y)),
+						btn.?,
+					)
+				}
+			case .MOUSE_BUTTON_UP:
+				if btn := sdl_button_to_mu_button(event.button.button); btn != nil {
+					mu.input_mouse_up(
+						ctx.mu_ctx,
+						i32(math.round(event.button.x)),
+						i32(math.round(event.button.y)),
+						btn.?,
+					)
+				}
+			case .MOUSE_WHEEL:
+				mu.input_scroll(
+					ctx.mu_ctx,
+					i32(event.wheel.integer_x * -30),
+					i32(event.wheel.integer_y * -30),
+				)
+			case .KEY_DOWN:
+				if key := sdl_key_to_mu_key(event.key.key); key != nil {
+					mu.input_key_down(ctx.mu_ctx, key.?)
+				}
+			case .KEY_UP:
+				if key := sdl_key_to_mu_key(event.key.key); key != nil {
+					mu.input_key_up(ctx.mu_ctx, key.?)
+				}
+			case .TEXT_INPUT:
+				mu.input_text(ctx.mu_ctx, strings.clone_from_cstring(event.text.text))
+			}
+		}
+
+		render(&ctx)
+	}
+}
+
+sdl_button_to_mu_button :: proc(sdl_btn: u8) -> Maybe(mu.Mouse) {
+	switch sdl_btn {
+	case sdl.BUTTON_LEFT:
+		return .LEFT
+	case sdl.BUTTON_RIGHT:
+		return .RIGHT
+	case sdl.BUTTON_MIDDLE:
+		return .MIDDLE
+	case:
+		return nil
+	}
+}
+
+sdl_key_to_mu_key :: proc(sdl_key: sdl.Keycode) -> (ret: Maybe(mu.Key)) {
+	switch sdl_key {
+	case sdl.K_LSHIFT, sdl.K_RSHIFT:
+		return .SHIFT
+	case sdl.K_LCTRL, sdl.K_RCTRL:
+		return .CTRL
+	case sdl.K_LALT, sdl.K_RALT:
+		return .ALT
+	case sdl.K_BACKSPACE:
+		return .BACKSPACE
+	case sdl.K_DELETE:
+		return .DELETE
+	case sdl.K_RETURN:
+		return .RETURN
+	case sdl.K_LEFT:
+		return .LEFT
+	case sdl.K_RIGHT:
+		return .RIGHT
+	case sdl.K_HOME:
+		return .HOME
+	case sdl.K_END:
+		return .END
+	case sdl.K_A:
+		return .A
+	case sdl.K_X:
+		return .X
+	case sdl.K_C:
+		return .C
+	case sdl.K_V:
+		return .V
+	case:
+		return nil
+	}
 }
 
 render :: proc(ctx: ^Context) {
-	bl.context_clear_all(ctx.bl_ctx)
-	defer bl.context_end(ctx.bl_ctx)
+	pixels: rawptr
+	pitch: c.int
 
-	// cmd_backing is the iteration context, since mu.next_command is implemented 	
-	// via pointer math.
-	cmd_backing: ^mu.Command
-	for var in mu.next_command_iterator(ctx.mu_ctx, &cmd_backing) {
-		switch cmd in var {
-		case ^mu.Command_Text:
-		case ^mu.Command_Icon:
-		case ^mu.Command_Rect:
-			rect := cast(bl.RectI)(cmd.rect)
-			bl.context_fill_rect_i_rgba32(ctx.bl_ctx, &rect, transmute(u32)(cmd.color))
-		case ^mu.Command_Clip:
-		case ^mu.Command_Jump:
-		}
+	if !sdl.LockTexture(ctx.texture, nil, &pixels, &pitch) {
+		return
 	}
 
+	img: bl.ImageCore
+
+	image_init_res := bl.image_init_as_from_data(
+		&img,
+		i32(ctx.render_width),
+		i32(ctx.render_height),
+		.PRGB32,
+		pixels,
+		int(pitch),
+		.RW,
+		nil,
+		nil,
+	)
+
+	if image_init_res != 0 {
+		return
+	}
+
+	defer bl.image_reset(&img)
+
+	{
+		bl.context_begin(ctx.bl_ctx, &img, nil)
+		defer bl.context_end(ctx.bl_ctx)
+
+		mu.begin(ctx.mu_ctx)
+		all_windows(ctx)
+		mu.end(ctx.mu_ctx)
+
+		bl.context_clear_all(ctx.bl_ctx)
+		bl.context_fill_all_rgba32(ctx.bl_ctx, transmute(u32)(ctx.bg))
+
+		// cmd_backing is the iteration context, since mu.next_command is implemented 	
+		// via pointer math.
+		cmd_backing: ^mu.Command
+		for var in mu.next_command_iterator(ctx.mu_ctx, &cmd_backing) {
+			switch cmd in var {
+			case ^mu.Command_Text:
+				_render_text(ctx, cmd)
+			case ^mu.Command_Icon:
+				_render_icon(ctx, cmd)
+			case ^mu.Command_Rect:
+				_render_rect(ctx, cmd)
+			case ^mu.Command_Clip:
+				_set_clip(ctx, cmd)
+			case ^mu.Command_Jump:
+				panic("jm_ jump command")
+			}
+		}
+
+	}
+
+	src := sdl.FRect {
+		w = f32(ctx.render_width),
+		h = f32(ctx.render_height),
+	}
+
+	sdl.UnlockTexture(ctx.texture)
+	sdl.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255)
+	sdl.RenderClear(ctx.renderer)
+	sdl.RenderTexture(ctx.renderer, ctx.texture, &src, nil)
+	sdl.RenderPresent(ctx.renderer)
+
+	texture_width: f32
+	texture_height: f32
+	sdl.GetTextureSize(ctx.texture, &texture_width, &texture_height)
+
+	sdl.SetWindowTitle(
+		ctx.window,
+		fmt.ctprintf(
+			"render %vx%v texture %vx%v logical %vx%v scale %v mouse (%v,%v)",
+			ctx.render_width,
+			ctx.render_height,
+			ctx.logical_width,
+			ctx.logical_height,
+			texture_width,
+			texture_height,
+			ctx.scale,
+			ctx.mu_ctx.mouse_pos.x,
+			ctx.mu_ctx.mouse_pos.y,
+		),
+	)
 }
 
+_render_text :: proc(ctx: ^Context, cmd: ^mu.Command_Text) {
+	font := cast(^FontHandle)(cmd.font)
+	text_data := cast(cstring)(raw_data(cmd.str))
+	text_len := uint(len(cmd.str))
+
+	fm: bl.FontMetrics
+	bl.font_get_metrics(font.font, &fm)
+
+	@(static) glyph_buffer: bl.GlyphBufferCore
+	bl.glyph_buffer_init(&glyph_buffer)
+	defer bl.glyph_buffer_reset(&glyph_buffer)
+
+	bl.glyph_buffer_set_text(&glyph_buffer, rawptr(text_data), uint(text_len), .UTF8)
+
+	tm: bl.TextMetrics
+	bl.font_get_text_metrics(font.font, &glyph_buffer, &tm)
+
+	// draw the text
+	{
+		origin := bl.PointI {
+			x = (cmd.pos.x * ctx.scale) + i32(tm.bounding_box.x0),
+			y = (cmd.pos.y * ctx.scale) + i32(fm.ascent), // Adjust from top to baseline
+		}
+		bl.context_fill_glyph_run_i_rgba32(
+			ctx.bl_ctx,
+			&origin,
+			ctx.font,
+			bl.glyph_buffer_get_glyph_run(&glyph_buffer),
+			transmute(u32)(cmd.color),
+		)
+	}
+
+	if ctx.debug_text {
+		// draw bounding box
+		{
+			rect := bl.RectI {
+				x = (cmd.pos.x * ctx.scale) + i32(tm.bounding_box.x0),
+				y = (cmd.pos.y * ctx.scale),
+				w = i32((tm.advance.x)),
+				h = i32(fm.descent + fm.ascent),
+			}
+			bl.context_stroke_rect_i_rgba32(ctx.bl_ctx, &rect, transmute(u32)(cmd.color))
+
+		}
+		// draw baseline
+		{
+			rect := bl.RectI {
+				x = (cmd.pos.x * ctx.scale) + i32(tm.bounding_box.x0),
+				y = (cmd.pos.y * ctx.scale) + i32(fm.ascent),
+				w = i32((tm.bounding_box.x1 - tm.bounding_box.x0)),
+				h = 1,
+			}
+			bl.context_stroke_rect_i_rgba32(ctx.bl_ctx, &rect, transmute(u32)(cmd.color))
+		}
+		// draw origin
+		{
+			rect := bl.RectI {
+				x = (cmd.pos.x * ctx.scale) + i32(tm.bounding_box.x0) - 6,
+				y = (cmd.pos.y * ctx.scale) - 6,
+				w = 12,
+				h = 12,
+			}
+			bl.context_stroke_rect_i_rgba32(ctx.bl_ctx, &rect, transmute(u32)(cmd.color))
+		}
+	}
+}
+
+_render_rect :: proc(ctx: ^Context, cmd: ^mu.Command_Rect) {
+	rect := bl.RectI {
+		x = cmd.rect.x * ctx.scale,
+		y = cmd.rect.y * ctx.scale,
+		w = cmd.rect.w * ctx.scale,
+		h = cmd.rect.h * ctx.scale,
+	}
+	bl.context_fill_rect_i_rgba32(ctx.bl_ctx, &rect, transmute(u32)(cmd.color))
+}
+
+// _render_icon uses vector paths to draw the icons to showcase blend's path api.
+_render_icon :: proc(ctx: ^Context, cmd: ^mu.Command_Icon) {
+	color := transmute(u32)(cmd.color)
+
+	rect := bl.Rect {
+		x = f64(cmd.rect.x * ctx.scale),
+		y = f64(cmd.rect.y * ctx.scale),
+		w = f64(cmd.rect.w * ctx.scale),
+		h = f64(cmd.rect.h * ctx.scale),
+	}
+
+	switch cmd.id {
+	case .NONE:
+		return
+	case .RESIZE:
+		size := bl.Size {
+			w = 18,
+			h = 18,
+		}
+		_draw_resize(ctx, rect, size, color)
+	case .CLOSE:
+		size := bl.Size {
+			w = 18,
+			h = 18,
+		}
+		_draw_close(ctx, rect, size, color)
+	case .CHECK:
+		size := bl.Size {
+			w = 18,
+			h = 18,
+		}
+		_draw_check(ctx, rect, size, color)
+	case .EXPANDED:
+		size := bl.Size {
+			w = 12,
+			h = 8,
+		}
+		_draw_down_angle(ctx, rect, size, color)
+	case .COLLAPSED:
+		size := bl.Size {
+			w = 8,
+			h = 12,
+		}
+		_draw_right_angle(ctx, rect, size, color)
+	}
+}
+
+_draw_resize :: proc(ctx: ^Context, rect: bl.Rect, size: bl.Size, rgba: u32) {
+	_draw_icon(ctx, rect, size, rgba, proc(p: ^bl.PathCore, size: bl.Size) {
+		bl.path_move_to(p, size.w, size.h / 2)
+		bl.path_line_to(p, size.w, size.h)
+		bl.path_move_to(p, size.w / 2, size.h)
+		bl.path_line_to(p, size.w, size.h)
+	})
+}
+
+_draw_close :: proc(ctx: ^Context, rect: bl.Rect, size: bl.Size, rgba: u32) {
+	_draw_icon(ctx, rect, size, rgba, proc(p: ^bl.PathCore, size: bl.Size) {
+		bl.path_move_to(p, 0, 0)
+		bl.path_line_to(p, size.w, size.h)
+		bl.path_move_to(p, size.w, 0)
+		bl.path_line_to(p, 0, size.h)
+	})
+}
+
+_draw_check :: proc(ctx: ^Context, rect: bl.Rect, size: bl.Size, rgba: u32) {
+	_draw_icon(ctx, rect, size, rgba, proc(p: ^bl.PathCore, size: bl.Size) {
+		bl.path_move_to(p, 0, (size.h / 2))
+		bl.path_line_to(p, (size.w / 3), size.h)
+		bl.path_line_to(p, size.w, 0)
+	})
+}
+
+_draw_right_angle :: proc(ctx: ^Context, rect: bl.Rect, size: bl.Size, rgba: u32) {
+	_draw_icon(ctx, rect, size, rgba, proc(p: ^bl.PathCore, size: bl.Size) {
+		bl.path_move_to(p, 0, 0)
+		bl.path_line_to(p, size.w, (size.h / 2))
+		bl.path_line_to(p, 0, size.h)
+	})
+}
+
+_draw_down_angle :: proc(ctx: ^Context, rect: bl.Rect, size: bl.Size, rgba: u32) {
+	_draw_icon(ctx, rect, size, rgba, proc(p: ^bl.PathCore, size: bl.Size) {
+		bl.path_move_to(p, 0, 0)
+		bl.path_line_to(p, (size.w / 2), size.h)
+		bl.path_line_to(p, size.w, 0)
+	})
+}
+
+
+// _draw_icon centers the path on the rect and draws it via the path_proc.
+// path_proc is expected to fill the PathCore with lines.
+_draw_icon :: proc(
+	ctx: ^Context,
+	rect: bl.Rect,
+	size: bl.Size,
+	rgba: u32,
+	path_proc: proc(_: ^bl.PathCore, _: bl.Size),
+) {
+	@(static) p: bl.PathCore
+
+	bl.path_init(&p)
+	defer bl.path_reset(&p)
+
+	path_proc(&p, size)
+
+	origin := bl.Point {
+		x = rect.x + (rect.w - size.w) / 2,
+		y = rect.y + (rect.w - size.h) / 2,
+	}
+
+	bl.context_set_stroke_options(ctx.bl_ctx, &bl.StrokeOptionsCore{width = 2})
+	defer bl.context_set_stroke_options(ctx.bl_ctx, &bl.StrokeOptionsCore{width = 1})
+
+	bl.context_stroke_path_d_rgba32(ctx.bl_ctx, &origin, &p, rgba)
+}
+
+// FIXME: there's some weird clipping behaviour: the moment text is even partially occluded,
+// the entire text run disappears. Also occurs for icons.
+_set_clip :: proc(ctx: ^Context, cmd: ^mu.Command_Clip) {
+	// TODO: verify this magic number.
+	// It's the number that microui spits out, I think it represents a clip clear
+	// by logically setting the clip to a super large dimension.
+	if cmd.rect.h == 16777216 {
+		bl.context_restore(ctx.bl_ctx, &ctx.cookie)
+	} else {
+		bl.context_save(ctx.bl_ctx, &ctx.cookie)
+		bl.context_clip_to_rect_i(
+			ctx.bl_ctx,
+			&bl.RectI {
+				x = cmd.rect.x * ctx.scale,
+				y = (ctx.render_height - (cmd.rect.y * ctx.scale + cmd.rect.h * ctx.scale)),
+				w = cmd.rect.w * ctx.scale,
+				h = cmd.rect.h * ctx.scale,
+			},
+		)
+	}
+}
+
+/*
+	UI Logic 
+*/
 
 u8_slider :: proc(ctx: ^mu.Context, val: ^u8, lo, hi: u8) -> (res: mu.Result_Set) {
 	mu.push_id(ctx, uintptr(val))
@@ -113,7 +649,7 @@ reset_log :: proc(ctx: ^Context) {
 all_windows :: proc(ctx: ^Context) {
 	@(static) opts := mu.Options{.NO_CLOSE}
 
-	if mu.window(ctx.mu_ctx, "Demo Window", {40, 40, 300, 450}, opts) {
+	if mu.window(ctx.mu_ctx, "Demo Window", {40, 40, 300, 500}, opts) {
 		if .ACTIVE in mu.header(ctx.mu_ctx, "Window Info") {
 			win := mu.get_current_container(ctx.mu_ctx)
 			mu.layout_row(ctx.mu_ctx, {54, -1}, 0)
@@ -201,6 +737,7 @@ all_windows :: proc(ctx: ^Context) {
 				mu.label(ctx.mu_ctx, "Red:"); u8_slider(ctx.mu_ctx, &ctx.bg.r, 0, 255)
 				mu.label(ctx.mu_ctx, "Green:"); u8_slider(ctx.mu_ctx, &ctx.bg.g, 0, 255)
 				mu.label(ctx.mu_ctx, "Blue:"); u8_slider(ctx.mu_ctx, &ctx.bg.b, 0, 255)
+				mu.label(ctx.mu_ctx, "Alpha:"); u8_slider(ctx.mu_ctx, &ctx.bg.a, 0, 255)
 			}
 			mu.layout_end_column(ctx.mu_ctx)
 
@@ -275,142 +812,6 @@ all_windows :: proc(ctx: ^Context) {
 			u8_slider(ctx.mu_ctx, &ctx.mu_ctx.style.colors[col].a, 0, 255)
 			mu.draw_rect(ctx.mu_ctx, mu.layout_next(ctx.mu_ctx), ctx.mu_ctx.style.colors[col])
 		}
-	}
-
-}
-
-print_sdl_pixel_format :: proc(pf: sdl.PixelFormat) {
-	switch pf {
-	case .UNKNOWN:
-		fmt.println("UNKNOWN")
-	case .INDEX1LSB:
-		fmt.println("INDEX1LSB")
-	case .INDEX1MSB:
-		fmt.println("INDEX1MSB")
-	case .INDEX2LSB:
-		fmt.println("INDEX2LSB")
-	case .INDEX2MSB:
-		fmt.println("INDEX2MSB")
-	case .INDEX4LSB:
-		fmt.println("INDEX4LSB")
-	case .INDEX4MSB:
-		fmt.println("INDEX4MSB")
-	case .INDEX8:
-		fmt.println("INDEX8")
-	case .RGB332:
-		fmt.println("RGB332")
-	case .XRGB4444:
-		fmt.println("XRGB4444")
-	case .XBGR4444:
-		fmt.println("XBGR4444")
-	case .XRGB1555:
-		fmt.println("XRGB1555")
-	case .XBGR1555:
-		fmt.println("XBGR1555")
-	case .ARGB4444:
-		fmt.println("ARGB4444")
-	case .RGBA4444:
-		fmt.println("RGBA4444")
-	case .ABGR4444:
-		fmt.println("ABGR4444")
-	case .BGRA4444:
-		fmt.println("BGRA4444")
-	case .ARGB1555:
-		fmt.println("ARGB1555")
-	case .RGBA5551:
-		fmt.println("RGBA5551")
-	case .ABGR1555:
-		fmt.println("ABGR1555")
-	case .BGRA5551:
-		fmt.println("BGRA5551")
-	case .RGB565:
-		fmt.println("RGB565")
-	case .BGR565:
-		fmt.println("BGR565")
-	case .RGB24:
-		fmt.println("RGB24")
-	case .BGR24:
-		fmt.println("BGR24")
-	case .XRGB8888:
-		fmt.println("XRGB8888")
-	case .RGBX8888:
-		fmt.println("RGBX8888")
-	case .XBGR8888:
-		fmt.println("XBGR8888")
-	case .BGRX8888:
-		fmt.println("BGRX8888")
-	case .ARGB8888:
-		fmt.println("ARGB8888")
-	case .RGBA8888:
-		fmt.println("RGBA8888")
-	case .ABGR8888:
-		fmt.println("ABGR8888")
-	case .BGRA8888:
-		fmt.println("BGRA8888")
-	case .XRGB2101010:
-		fmt.println("XRGB2101010")
-	case .XBGR2101010:
-		fmt.println("XBGR2101010")
-	case .ARGB2101010:
-		fmt.println("ARGB2101010")
-	case .ABGR2101010:
-		fmt.println("ABGR2101010")
-	case .RGB48:
-		fmt.println("RGB48")
-	case .BGR48:
-		fmt.println("BGR48")
-	case .RGBA64:
-		fmt.println("RGBA64")
-	case .ARGB64:
-		fmt.println("ARGB64")
-	case .BGRA64:
-		fmt.println("BGRA64")
-	case .ABGR64:
-		fmt.println("ABGR64")
-	case .RGB48_FLOAT:
-		fmt.println("RGB48_FLOAT")
-	case .BGR48_FLOAT:
-		fmt.println("BGR48_FLOAT")
-	case .RGBA64_FLOAT:
-		fmt.println("RGBA64_FLOAT")
-	case .ARGB64_FLOAT:
-		fmt.println("ARGB64_FLOAT")
-	case .BGRA64_FLOAT:
-		fmt.println("BGRA64_FLOAT")
-	case .ABGR64_FLOAT:
-		fmt.println("ABGR64_FLOAT")
-	case .RGB96_FLOAT:
-		fmt.println("RGB96_FLOAT")
-	case .BGR96_FLOAT:
-		fmt.println("BGR96_FLOAT")
-	case .RGBA128_FLOAT:
-		fmt.println("RGBA128_FLOAT")
-	case .ARGB128_FLOAT:
-		fmt.println("ARGB128_FLOAT")
-	case .BGRA128_FLOAT:
-		fmt.println("BGRA128_FLOAT")
-	case .ABGR128_FLOAT:
-		fmt.println("ABGR128_FLOAT")
-	case .YV12:
-		fmt.println("YV12")
-	case .IYUV:
-		fmt.println("IYUV")
-	case .YUY2:
-		fmt.println("YUY2")
-	case .UYVY:
-		fmt.println("UYVY")
-	case .YVYU:
-		fmt.println("YVYU")
-	case .NV12:
-		fmt.println("NV12")
-	case .NV21:
-		fmt.println("NV21")
-	case .P010:
-		fmt.println("P010")
-	case .EXTERNAL_OES:
-		fmt.println("EXTERNAL_OES")
-	case .MJPG:
-		fmt.println("MJPG")
 	}
 }
 
