@@ -1,3 +1,9 @@
+// This file "collects" information from the headers we are creating bindings for, using libclang.
+//
+// It tries to do as little processing of the information as possible. It is usually good to first
+// collect all information and then process it, as you otherwise get issues with knowing if
+// something has already been declared etc. The processing happens in `translate_process.odin` and
+// and `translate_macros.odin`.
 #+private file
 #+feature dynamic-literals
 package bindgen2
@@ -11,6 +17,8 @@ import "core:unicode"
 import "core:unicode/utf8"
 import "core:fmt"
 
+// Return value of `translate_collect`. It's not all that proc returns however, it also writes into
+// its `types` and `decls` parameters.
 @(private="package")
 Translate_Collect_Result :: struct {
 	source: string,
@@ -18,9 +26,8 @@ Translate_Collect_Result :: struct {
 	macros: []Raw_Macro,
 }
 
-// Parses the C headers and "collects" the things we need from them. This will create a bunch types
-// and declarations in the `Translate_State` struct. This file avoids doing any furher processing,
-// that is deferred to `translate_process`.
+// Parses the C headers and "collects" the things we need from them. This file avoids doing any
+// further processing, that is deferred to `translate_macros` and `translate_process`.
 @(private="package", require_results)
 translate_collect :: proc(filename: string, config: Config, types: Type_List, decls: Decl_List) -> (Translate_Collect_Result, bool) {
 	clang_version := string_from_clang_string(clang.getClangVersion())
@@ -39,7 +46,10 @@ translate_collect :: proc(filename: string, config: Config, types: Type_List, de
 	}
 
 	clang_args: [dynamic]cstring
+	// This makes sure we get comments in the clang AST.
 	append(&clang_args, "-fparse-all-comments")
+	// Strict mode: warn about undefined/implicit types
+	append(&clang_args, "-Wimplicit")
 
 	for &include in config.clang_include_paths {
 		append(&clang_args, fmt.ctprintf("-I%v", include))
@@ -65,6 +75,7 @@ translate_collect :: proc(filename: string, config: Config, types: Type_List, de
 
 	filename_cstr := to_cstring(filename)
 
+	// This makes an Abstract Syntax Tree (AST) that can be browsed using the libclang API.
 	err := clang.parseTranslationUnit2(
 		index,
 		filename_cstr,
@@ -81,12 +92,38 @@ translate_collect :: proc(filename: string, config: Config, types: Type_List, de
 		return {}, false
 	}
 
+	// Check for diagnostics (errors and such).
+	for i in 0 ..< clang.getNumDiagnostics(unit) {
+		diag := clang.getDiagnostic(unit, i)
+		severity := clang.getDiagnosticSeverity(diag)
+		diag_message := string_from_clang_string(clang.formatDiagnostic(diag, clang.defaultDiagnosticDisplayOptions()))
+
+		log_level: log.Level
+		switch severity {
+		case .Ignored:
+			log_level = .Debug
+		case .Note:
+			log_level = .Info
+		case .Warning:
+			log_level = .Warning
+		case .Error:
+			log_level = .Error
+		case .Fatal:
+			log_level = .Fatal
+		}
+		log.log(log_level, diag_message)
+
+		clang.disposeDiagnostic(diag)
+	}
+
 	file := clang.getFile(unit, filename_cstr)
 	root_cursor := clang.getTranslationUnitCursor(unit)
 	source_size: uint
 	source := clang.getFileContents(unit, file, &source_size)
 
 	tcs := Translate_Collect_State {
+		// The source is used to extract some comments in `translate_process`. Clang fails to
+		// include some comments.
 		source = strings.string_from_ptr((^u8)(source), int(source_size)),
 		translation_unit = unit,
 		types = types,
@@ -95,6 +132,9 @@ translate_collect :: proc(filename: string, config: Config, types: Type_List, de
 
 	// I dislike visitors. They make the code hard to read. So I build a map of all parents and
 	// children. That way we can use this lookup to find arrays of children and iterate them normally.
+	//
+	// Also, the combination of Odin + C visitors is annoying because the context isn't passed
+	// along, making it even worse.
 	build_cursor_children_lookup(root_cursor, &tcs.children_lookup)
 
 	root_children := tcs.children_lookup[root_cursor]
@@ -103,10 +143,13 @@ translate_collect :: proc(filename: string, config: Config, types: Type_List, de
 		loc := get_cursor_location(c)
 
 		if clang.File_isEqual(file, loc.file) == 0 {
+			if c.kind == .MacroDefinition {
+				create_foreign_macro_declaration(c, &tcs, config)
+			}
 			continue
 		}
 
-		create_declaration(c, &tcs)
+		create_declaration(c, &tcs, config)
 	}
 
 	extra_imports, extra_imports_err := slice.map_keys(tcs.extra_imports)
@@ -121,6 +164,7 @@ translate_collect :: proc(filename: string, config: Config, types: Type_List, de
 
 Cursor_Children_Map :: map[clang.Cursor][]clang.Cursor
 
+// Convenient blob to pass around within this file, instead of lots of procs params.
 Translate_Collect_State :: struct {
 	decls: Decl_List,
 	type_lookup: map[clang.Type]Type_Index,
@@ -129,9 +173,12 @@ Translate_Collect_State :: struct {
 	source: string,
 	extra_imports: map[string]bool,
 	macros: [dynamic]Raw_Macro,
+	macro_prefix_to_enum_decl: map[string]int,
 	translation_unit: clang.Translation_Unit,
 }
 
+// Recursive proc to visit everthing in AST and make a handy lookup so we don't have to use
+// visitor callbacks later.
 build_cursor_children_lookup :: proc(c: clang.Cursor, res: ^Cursor_Children_Map) {
 	Build_Children_State :: struct {
 		res: ^Cursor_Children_Map,
@@ -158,16 +205,18 @@ build_cursor_children_lookup :: proc(c: clang.Cursor, res: ^Cursor_Children_Map)
 	res[c] = bcs.children[:]
 }
 
-create_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State) {
-	if clang.Cursor_isAnonymous(c) == 1 && c.kind != .EnumDecl {
-		return
-	}
-
+// Finds things such as procs and struct declarations and stores them in `tcs.decls`. Recursive.
+// Also runs `create_type_recursive` which will fill out `tcs.types`.
+create_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State, config: Config) {
 	name := get_cursor_name(c)
 	comment_before := string_from_clang_string(clang.Cursor_getRawCommentText(c))
 	line := get_cursor_location(c).line
+
+	// When the cursor is actually defined somewhere else in the file. Used later to resolve
+	// forward declarations.
 	is_forward_declare := clang.isCursorDefinition(c) == 0
 
+	// Comments on the right side of the line aren't picked up by clang. So we extract them manually.
 	side_comment: string
 	side_comment_align_whitespace: int
 	{
@@ -176,10 +225,17 @@ create_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State) {
 		start := clang.getRangeStart(source_range)
 		start_offset: u32
 		clang.getExpansionLocation(start, nil, nil, nil, &start_offset)
-		end := clang.getRangeEnd(source_range)
-		end_offset: u32
-		clang.getExpansionLocation(end, nil, nil, nil, &end_offset)
-		side_comment, side_comment_align_whitespace = find_comment_at_line_end(tcs.source[start_offset:])
+		
+		// Function params can have comments which causes find_comment_at_line_end
+		// to return the wrong comment so we find the end of the fn first.
+		if c.kind == .FunctionDecl {
+			for ; int(start_offset) < len(tcs.source); start_offset += 1 {
+				if tcs.source[start_offset] == ';' {
+					break
+				}
+			}
+		}
+		side_comment, side_comment_align_whitespace, _ = find_next_comment(tcs.source[start_offset:])
 	}
 
 	ct := clang.getCursorType(c)
@@ -195,19 +251,21 @@ create_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State) {
 			return
 		}
 
-		add_decl(tcs.decls, {
-			comment_before = comment_before,
-			def = ti,
-			name = name,
-			original_line = line,
-			side_comment = side_comment,
-			is_forward_declare = is_forward_declare,
-		})
+		if clang.Cursor_isAnonymous(c) == 0 {
+			add_decl(tcs.decls, {
+				comment_before = comment_before,
+				def = ti,
+				name = name,
+				original_line = line,
+				side_comment = side_comment,
+				is_forward_declare = is_forward_declare,
+			})
+		}
 
 		children := tcs.children_lookup[c]
 
 		for cc in children {
-			create_declaration(cc, tcs)
+			create_declaration(cc, tcs, config)
 		}
 
 	case .TypedefDecl:
@@ -238,19 +296,23 @@ create_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State) {
 		if clang.Cursor_isAnonymous(c) == 1 {
 			e, is_enum := tcs.types[ti].(Type_Enum)
 
-			if is_enum {
-				for &m in e.members {
-					add_decl(tcs.decls, {
-						name = m.name,
-						def = Fixed_Value(fmt.tprint(m.value)),
-						original_line = line,
+			new_name, exists := config.deanon_enums[e.members[0].name]
+			if !exists {
+				if is_enum {
+					for &m in e.members {
+						add_decl(tcs.decls, {
+							name = m.name,
+							def = Fixed_Value(fmt.tprint(m.value)),
+							original_line = line,
 
-						// It's not really from a macro, but it's probably best if it behaves as if.
-						from_macro = true,
-					})
+							// It's not really from a macro, but it's probably best if it behaves as if.
+							from_macro = true,
+						})
+					}
 				}
+				return
 			}
-			return
+			name = new_name
 		}
 
 		add_decl(tcs.decls, {
@@ -357,6 +419,47 @@ create_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State) {
 	}
 }
 
+// This is basically a copy paste of the above functions MacroDefinition case
+// except I removed some lines that caused bounds check issues due to getting
+// the definition from a outside out normal files bounds.
+create_foreign_macro_declaration :: proc(c: clang.Cursor, tcs: ^Translate_Collect_State, config: Config) {
+	name := get_cursor_name(c)
+
+	source_range := clang.getCursorExtent(c)
+
+	clang_tokens: [^]clang.Token
+	clang_token_count: u32
+	clang.tokenize(tcs.translation_unit, source_range, &clang_tokens, &clang_token_count)
+
+	if clang_token_count > 1 {
+		tokens := make([]Raw_Macro_Token, clang_token_count - 1)
+
+		for i in 1..<clang_token_count {
+			val := string_from_clang_string(clang.getTokenSpelling(tcs.translation_unit, clang_tokens[i]))
+			kind: Raw_Macro_Token_Kind
+
+			#partial switch clang.getTokenKind(clang_tokens[i]) {
+			case .Punctuation: kind = .Punctuation
+			case .Keyword:     kind = .Keyword
+			case .Identifier:  kind = .Identifier
+			case .Literal:     kind = .Literal
+			}
+
+			tokens[i - 1] = {
+				value = val,
+				kind = kind,
+			}
+		}
+
+		append(&tcs.macros, Raw_Macro {
+			name = name,
+			is_function_like = clang.Cursor_isMacroFunctionLike(c) == 1,
+			tokens = tokens,
+			_foreign = true,
+		})
+	}
+}
+
 find_comment_before :: proc(src: string, start_rune: rune, start_offset: int) -> string {
 	Find_Comment_State :: enum {
 		Looking_For_Start,
@@ -436,9 +539,16 @@ find_comment_before :: proc(src: string, start_rune: rune, start_offset: int) ->
 	return ""
 }
 
-find_comment_at_line_end :: proc(str: string) -> (string, int) {
+Comment_Type :: enum {
+	Line,
+	Block,
+}
+
+// delimiters is a bit of a hack to get this to work for proc params.
+// without it this function will return e.g. param 3's comment for param 1.
+find_next_comment :: proc(str: string, delimiters: map[rune]struct{} = {}) -> (string, int, Comment_Type) {
 	space_before_comment: int
-	comment_start: int
+	comment_start: int = -1
 	block_comment: bool
 
 	for c, i in str {
@@ -451,15 +561,15 @@ find_comment_at_line_end :: proc(str: string) -> (string, int) {
 			comment_start = i
 			block_comment = true
 			break
-		} else if c == '\n' {
+		} else if c == '\n' || c in delimiters {
 			break
 		} else {
 			space_before_comment = 0
 		}
 	}
 
-	if comment_start == 0 {
-		return "", 0
+	if comment_start == -1 {
+		return "", 0, .Line
 	}
 
 	if block_comment {
@@ -467,7 +577,7 @@ find_comment_at_line_end :: proc(str: string) -> (string, int) {
 
 		for c, i in from_start {
 			if c == '*' && i < len(from_start) - 1 && from_start[i + 1] == '/' {
-				return from_start[:i+2], space_before_comment
+				return from_start[:i+2], space_before_comment, .Block
 			}
 		}
 	} else {
@@ -475,12 +585,12 @@ find_comment_at_line_end :: proc(str: string) -> (string, int) {
 
 		for c, i in from_start {
 			if c == '\n' {
-				return from_start[:i], space_before_comment
+				return from_start[:i], space_before_comment, .Line
 			}
 		}
 	}
 
-	return "", 0
+	return "", 0, .Line
 }
 
 type_probably_is_cstring :: proc(ct: clang.Type) -> bool {
@@ -592,10 +702,22 @@ is_fixed_array :: proc(ct: clang.Type) -> bool {
 
 // This is a separate proc because we call it both from create_type_recursive and from
 // create_declaration. It's used in create_declaration so we get a unique proc type per proc.
-// Otherweise the FunctionProto stuff may make it so that ther are shared proc types, which will
+// Otherwise the FunctionProto stuff may make it so that there are shared proc types, which will
 // break stuff.
 create_proc_type :: proc(param_childs: []clang.Cursor, ct: clang.Type, tcs: ^Translate_Collect_State) -> Type_Index {
-	proc_type := reserve_type(ct, tcs)
+	ct := ct
+	root_type := reserve_type(ct, tcs)
+	proc_type := root_type
+
+	for ct.kind == .Pointer {
+		ct = clang.getPointeeType(ct)
+		nested_type := reserve_type(ct, tcs)
+		tcs.types[proc_type] = Type_Pointer {
+			pointed_to_type = nested_type,
+		}
+		proc_type = nested_type
+	}
+
 	params: [dynamic]Type_Procedure_Parameter
 
 	if len(param_childs) > 0 {
@@ -628,9 +750,16 @@ create_proc_type :: proc(param_childs: []clang.Cursor, ct: clang.Type, tcs: ^Tra
 				}
 			}
 
+			range := clang.Cursor_getSpellingNameRange(child, 0, 0)
+			range_start := clang.getRangeStart(range)
+			offset_start: u32
+			clang.getSpellingLocation(range_start, nil, nil, nil, &offset_start)
+			comment, _, type := find_next_comment(tcs.source[offset_start:], {',' = {}})
+
 			append(&params, Type_Procedure_Parameter {
 				name = name,
 				type = type_id,
+				comment = type == .Block ? comment : "", // Line comments cause issues so don't accept them
 			})
 		}
 	} else {
@@ -671,7 +800,7 @@ create_proc_type :: proc(param_childs: []clang.Cursor, ct: clang.Type, tcs: ^Tra
 	}
 
 	tcs.types[proc_type] = type_definition
-	return proc_type
+	return root_type
 }
 
 reserve_type :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> Type_Index {
@@ -716,28 +845,40 @@ unwrap_proc_pointers :: proc(t: clang.Type) -> (unwrapped_type: clang.Type, is_p
 	return t, (t.kind == .FunctionProto || t.kind == .FunctionNoProto)
 }
 
+// Used to create entries in `tcs.types` given a `clang.Type`. Has a lookup so that types can refer
+// to other types. This makes it possible to create types such as `^^Some_Struct` where everyone
+// sees the same type `Some_Struct`.
 create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> Type_Index {
 	if t_idx, has_t_idx := tcs.type_lookup[ct]; has_t_idx {
 		return t_idx
 	}
 
+	// Anonymous types are those that do not end up in `type_lookup`. They can never be referred to
+	// other than by the thing that calls this proc. Used for inline type definitions.
 	add_anonymous_type :: proc(t: Type, types: ^[dynamic]Type) -> Type_Index {
 		idx := Type_Index(len(types))
 		append(types, t)
 		return idx
 	}
 
-	to_add: Maybe(Type)
-
 	#partial switch ct.kind {
 	case .Pointer:
 		clang_pointee_type := clang.getPointeeType(ct)
 
+		// The current type is a pointer. Here we do some special cases for void pointers and
+		// string-like things. This makes `void*` become `rawptr` etc.
+
 		if clang_pointee_type.kind == .Void {
-			to_add = Type_Raw_Pointer{}
+			idx := reserve_type(ct, tcs)
+			tcs.types[idx] = Type_Raw_Pointer{}
+			return idx
 		} else if type_probably_is_cstring(ct) {
-			to_add = Type_CString{}
+			idx := reserve_type(ct, tcs)
+			tcs.types[idx] = Type_CString{}
+			return idx
 		} else if clang_pointee_type.kind == .FunctionProto {
+			// In Odin a function pointer type should be just `proc`, not `^proc`. This is because
+			// all procs in Odin are pointers.
 			return create_proc_type(tcs.children_lookup[clang.getTypeDeclaration(clang_pointee_type)], clang_pointee_type, tcs)
 		} else {
 			ptr_type_idx := reserve_type(ct, tcs)
@@ -745,6 +886,8 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 			tcs.types[ptr_type_idx] = Type_Pointer { pointed_to_type = pointing_to_id }
 			return ptr_type_idx
 		}
+
+	// Structs and raw unions
 	case .Record:
 		c := clang.getTypeDeclaration(ct)
 		struct_type_idx := reserve_type(ct, tcs)
@@ -760,6 +903,8 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 				sct := clang.getCursorType(sc)
 				type_id: Definition
 
+				// Check if field is function pointer. In that case create the proc type directly,
+				// bypassing one level of pointerness.
 				if unwrapped_type, is_proc := unwrap_proc_pointers(sct); is_proc {
 					type_id = create_proc_type(tcs.children_lookup[sc], unwrapped_type, tcs)
 				} else {
@@ -775,7 +920,7 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 				field_loc := get_cursor_location(sc)
 
 				comment_before := find_comment_before(tcs.source, '\n', field_loc.offset)
-				comment_on_right, _ := find_comment_at_line_end(tcs.source[field_loc.offset:])
+				comment_on_right, _, _ := find_next_comment(tcs.source[field_loc.offset:])
 
 				if prev_named_field >= 0 && prev_named_field == len(fields) - 1 &&
 				fields[prev_named_field].type == type_id && field_loc.line == fields[prev_named_field].line {
@@ -790,7 +935,12 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 						line = field_loc.line,
 					})
 				}
-
+			
+			// This is for fields that are anonymous struct types. Note that there are Record,
+			// StructDecl and UnionDecl. Record is the cursor kind used for struct or union types.
+			// StructDecl and UnionDecl are the cursor kinds for the declarations themselves. I.e.
+			// named things in the file. However, there can be unnamed decls as we see here, which
+			// happens when we have this kind of anonymous struct types. 
 			case .StructDecl, .UnionDecl:
 				if clang.Cursor_isAnonymousRecordDecl(sc) == 1 {
 					sct := clang.getCursorType(sc)
@@ -841,7 +991,7 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 			cursor_loc := get_cursor_location(ec)
 
 			comment_before := find_comment_before(tcs.source, '\n', cursor_loc.offset)
-			comment_on_right, _ := find_comment_at_line_end(tcs.source[cursor_loc.offset:])
+			comment_on_right, _, _ := find_next_comment(tcs.source[cursor_loc.offset:])
 
 			append(&members, Type_Enum_Member {
 				name = member_name,
@@ -890,7 +1040,7 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 
 		type_definition := Type_Enum {
 			storage_type = storage_type,
-			members = members[:],
+			members = members,
 		}
 
 		tcs.types[enum_type_idx] = type_definition
@@ -922,6 +1072,7 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 
 		return alias_type_idx
 	case .ConstantArray:
+		// For fixed size arrays. 
 		array_type_idx := reserve_type(ct, tcs)
 		clang_element_type := clang.getArrayElementType(ct)
 
@@ -935,6 +1086,8 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 		return array_type_idx
 
 	case .IncompleteArray:
+		// For arrays that don't have a specified size. This is actually just an array in C. But the
+		// array-ness of hints that this should be a multi pointer.
 		array_type_idx := reserve_type(ct, tcs)
 		clang_element_type := clang.getArrayElementType(ct)
 
@@ -948,12 +1101,6 @@ create_type_recursive :: proc(ct: clang.Type, tcs: ^Translate_Collect_State) -> 
 
 	case .FunctionProto, .FunctionNoProto:
 		return create_proc_type({}, ct, tcs)
-	}
-
-	if t, t_ok := to_add.?; t_ok {
-		idx := reserve_type(ct, tcs)
-		tcs.types[idx] = t
-		return idx
 	}
 
 	//log.error("Unknown type")

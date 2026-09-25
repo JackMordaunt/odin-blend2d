@@ -1,9 +1,5 @@
 inputs = [
-    "./src/test.h"
+	"./src/test.h"
 ]
 
 output_folder = "binding"
-
-import_lib = "test.lib"
-
-debug_dump_ast = true

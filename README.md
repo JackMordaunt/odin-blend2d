@@ -18,7 +18,7 @@ Features:
 	- On Windows: Download libclang 20.1.8 from here: https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/clang+llvm-20.1.8-x86_64-pc-windows-msvc.tar.xz -- Copy the following from that archive:
 		- `lib/libclang.lib` into the generator's 'libclang' folder
 		- `bin/libclang.dll` into the root of the generator (next to where the bindgen executable will end up).
-	- On Linux/mac, please install libclang. For example using `apt install libclang-dev` on Ubuntu/Debian/Mint. Anything from clang version 16 and new should work.
+	- On Linux/mac, please install libclang. For example using `apt install libclang-dev` on Ubuntu/Debian/Mint. Anything from clang version 16 and newer should work.
 
 > [!NOTE]
 > libclang is used for analysing the C headers and deciding what Odin code to output.
@@ -37,7 +37,7 @@ Add a `bindgen.sjson` to your bindings folder. I.e. inside the folder you feed i
 
 > NOTE: Config uses the function/type names as found in header files.
 
-```sjson
+```json5
 // Inputs can be folders or files. If you provide a folder name, then the generator will look for
 // header (.h) files inside it. The bindings will be based on those headers. For each header,
 // you can create a `header_footer.odin` file with some additional code to append to the finished
@@ -107,12 +107,25 @@ struct_field_tags = {
 	// "BoneInfo.name" = "fmt:\"s,0\""
 }
 
+// Set the #align(some_number) on a given struct
+struct_align = {
+    // "Mesh" = 4
+}
+
 // Remove a specific enum member. Write the C name of the member. You can also use wildcards
 // such as *_Count
 remove_enum_members = [
 	// "MAGICAL_ENUM_ALL"
 	// "_*Count"
 ]
+
+// Enums automatically have any prefix that is sharred by all members removed. This sometimes
+// misbehaves for certain names. Use this setting to manually set the perfix to remove for a
+// certain enum type.
+remove_enum_member_prefix = {
+	// "enum type name" = "enum member prefix to strip"
+	// "PixelFormat" = "PIXEL_FORMAT_"
+}
 
 // Overrides the type of a procedure parameter or return value. For a parameter use the key
 // Proc_Name.parameter_name. For a return value use the key Proc_Name.
@@ -127,7 +140,7 @@ procedure_type_overrides = {
 // write the plain-text Odin value as value.
 //
 // You can also add defaults for proc parameters within structs. In that case you do:
-// `Struct_Name.proc_field.parameter_name` -- This does not currently support nested structs.
+// `Struct_Name.proc_field.parameter_name`
 procedure_parameter_defaults = {
 	// "DrawTexturePro.tint" = "RED"
 	// "Some_Struct.a_field_that_is_a_proc.some_parameter" = "5"
@@ -137,6 +150,21 @@ procedure_parameter_defaults = {
 remove = [
 	// "Some_Declaration_Name"
 ]
+
+// By default anonymous enums have their members flattened into constants.
+// Use this option to instead create a new enum type.
+//
+// The key is the name of the first member of the anonymous enum, which is used
+// to identify it. The value is the name of the emitted enum.
+deanon_enums = {
+	"First_Member_Name" = "New_Enum_Name"
+}
+
+// Constructs a new enum from all macros using a prefix.
+// Combine with bit_setify to make a bit set from macros.
+enumify_macros = {
+	"Macro_Prefix" = "New_Enum_Name"
+},
 
 // Group all procedures at the end of the file.
 procedures_at_end = false
@@ -177,13 +205,14 @@ In `bindgen.sjson`:
 
 ```
 bit_setify = {
-	"your_enum" = "the_bit_set_type"
+	"Enum_To_Turn_Into_Bitset" = "New_Enum_Type_Name"
 }
 ```
 
-This will create a type `the_bit_set_type :: bit_set[your_enum; c.int`.
+This will replace the type `Enum_To_Turn_Into_Bitset` (an enum) with a bit_set. The type will look like this:
+This will create a type `Enum_To_Turn_Into_Bitset :: bit_set[New_Enum_Type_Name; i32]`.
 
-It will also translate the values of the enum by calculating their log2 value (that gives you the bit index instead of the integer value corresponding to that bit).
+The members that `Enum_To_Turn_Into_Bitset` had when it was an enum will be moved into a new enum called `New_Enum_Type_Name`. Within that enum the members will have their values converted using a log2 procedure. The log2 procedure turns for example 2 into 1 and 4 into 2. The bit_set itself will use these numbers to target a specific bit within its backing type.
 
 ### My headers can't find other headers in the same folder
 
@@ -194,6 +223,14 @@ clang_include_paths = [
 	"include"
 ]
 ```
+
+## Contributing
+
+If you want to fix issues or add features, then you can create a Pull Request to this repository.
+
+Check out the [Issues](https://github.com/karl-zylinski/odin-c-bindgen/issues) tab and see if there is something you could help with.
+
+To learn more about how the program works, start by looking in the `src/main.odin` file. That file loads the bindgen configuration file and then runs procedures in `src/translate_collect.odin`, `src/translate_macros.odin`, `src/translate_process.odin` and `src/output.odin`. All those files have some comments that try to explain what they do.
 
 ## Acknowledgements
 
