@@ -61,5 +61,8 @@ c_type_mapping := map[string]string {
 	"timespec"   = "posix.timespec",
 
 	// libc
+	"FILE"   = "libc.FILE",
+	"fpos_t" = "libc.fpos_t",
+
 	"time_t" = "libc.time_t",
 }

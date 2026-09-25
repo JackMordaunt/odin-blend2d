@@ -96,9 +96,6 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 		}
 	}
 
-	// Declared here to reuse.
-	bit_set_make_constant: map[string]int
-
 	for &d, i in decls {
 		if i == 0 {
 			d.invalid = true
@@ -138,7 +135,16 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 
 		#partial switch &v in type {
 		case Type_Enum:
+			automatically_strip_member_prefixes := true
+			strip_member_prefix := config.remove_enum_member_prefix[d.name]
+
+			original_member_names: [dynamic]string
+
 			{
+				if strip_member_prefix != "" {
+					automatically_strip_member_prefixes = false
+				}
+
 				new_members: [dynamic]Type_Enum_Member
 				
 				member_loop: for m in v.members {
@@ -158,17 +164,31 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 						}
 					}
 
-					append(&new_members, m)
+					append(&original_member_names, m.name)
+
+					new_m := m
+					new_m.name = strings.trim_prefix(new_m.name, strip_member_prefix)
+
+					append(&new_members, new_m)
 				}
 
-				v.members = new_members[:]
+				v.members = new_members
+			}
+
+			if automatically_strip_member_prefixes {
+				strip_enum_member_prefixes(&v)
+			}
+
+			// Stripping might have caused members to start with a number. Fix that!
+			for &m in v.members {
+				if is_number(m.name[0]) {
+					m.name = fmt.tprintf("_%v", m.name)
+				}
 			}
 
 			bit_set_enum_name, bit_setify := config.bit_setify[d.name]
 
 			if bit_setify {
-				clear(&bit_set_make_constant)
-
 				bs_idx := add_type(types, Type_Bit_Set {
 					enum_type = d.def.(Type_Index),
 					enum_decl_name = Type_Name(bit_set_enum_name),
@@ -177,41 +197,57 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 				new_members: [dynamic]Type_Enum_Member
 
 				// log2-ify value so `2` becomes `1`, `4` becomes `2` etc.
-				for m in v.members {
+				for m, m_idx in v.members {
 					if m.value == 0 {
 						continue
 					}
 
-					if bits.count_ones(m.value) != 1 {
-						// Not a power of two, so not part of a bit_set. Save it for later for making
-						// it into a constant.
-						bs_constant_idx := add_type(types, Type_Bit_Set_Constant {
-							bit_set_type = bs_idx,
-							bit_set_type_name = Type_Name(d.name),
-							value = m.value,
+					if bits.count_ones(m.value) == 1 {
+						append(&new_members, Type_Enum_Member {
+							name = m.name,
+							value = int(bits.log2(uint(m.value))), // use transmute incase m.value == min(i64)
+							comment_before = m.comment_before,
+							comment_on_right = m.comment_on_right,
 						})
-
-						all_constant := strings.to_screaming_snake_case(strings.trim_prefix(strings.to_lower(m.name), strings.to_lower(config.remove_type_prefix)))
-
-						add_decl(decls, {
-							original_line = d.original_line + 2,
-							name = all_constant,
-							def = bs_constant_idx,
-							explicitly_created = true,
+						continue
+					} else if v.storage_type == i32 && m.value == bits.I32_MIN {
+						// If the type is i32 then a value of min(i32) would be the most significant bit.
+						// The i64 case shouldn't be necessary as that should return bits.count_ones = 1
+						append(&new_members, Type_Enum_Member {
+							name = m.name,
+							value = 31,
+							comment_before = m.comment_before,
+							comment_on_right = m.comment_on_right,
 						})
-
 						continue
 					}
 
-					append(&new_members, Type_Enum_Member {
-						name = m.name,
-						value = int(bits.log2(uint(m.value))),
-						comment_before = m.comment_before,
-						comment_on_right = m.comment_on_right,
+					// Not a power of two, so not part of a bit_set. Save it for later for making
+					// it into a constant.
+					bs_constant_idx := add_type(types, Type_Bit_Set_Constant {
+						bit_set_type = bs_idx,
+						bit_set_type_name = Type_Name(d.name),
+						value = m.value,
+					})
+
+					name := m.name
+
+					if len(original_member_names) == len(v.members) {
+						name = original_member_names[m_idx]
+					}
+
+					constant_name := strings.to_screaming_snake_case(strings.trim_prefix(strings.to_lower(name), strings.to_lower(config.remove_type_prefix)))
+
+					add_decl(decls, {
+						original_line = d.original_line + 2,
+						original_line_sort_tie_breaker = m_idx,
+						name = constant_name,
+						def = bs_constant_idx,
+						explicitly_created = true,
 					})
 				}
 
-				v.members = new_members[:]
+				v.members = new_members
 
 				enum_decl := d
 				enum_decl.comment_before = ""
@@ -225,68 +261,16 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 			}
 
 		case Type_Struct:
-			for &f in v.fields {
-				if len(f.names) != 1 {
-					continue
-				}
+			override_struct(&v, d.name, types, config)
 
-				field_key := fmt.tprintf("%s.%s", d.name, f.names[0])
-				if override, has_override := config.struct_field_overrides[field_key]; has_override {
-					if override == "[^]" {
-						if ptr_type, is_ptr_type := resolve_type_definition(types, f.type, Type_Pointer); is_ptr_type {
-							f.type = add_type(types, Type_Multipointer {
-								pointed_to_type = ptr_type.pointed_to_type,
-							})
-						}	
-					} else if override == "using" {
-						f.is_using = true
-					} else {
-						f.type = Fixed_Value(override)
-					}
-				}
-
-				if proc_type := resolve_type_definition_ptr(types, f.type, Type_Procedure); proc_type != nil {
-					for &param in proc_type.parameters {
-						key := fmt.tprintf("%s.%s.%s", d.name, f.names[0], param.name)
-						
-						if default, has_default := config.procedure_parameter_defaults[key]; has_default {
-							param.default = default
-						}
-
-						if override, has_override := config.procedure_type_overrides[key]; has_override {
-							override_procedure_parameter(&param, types, override)
-						}
-					}
-				}
-
-				if tag, has_tag := config.struct_field_tags[field_key]; has_tag {
-					f.tag = tag
-				}
-			}
 		case Type_Procedure:
-			for &p in v.parameters {
-				param_key := fmt.tprintf("%s.%s", d.name, p.name)
-				if override, has_override := config.procedure_type_overrides[param_key]; has_override {
-					override_procedure_parameter(&p, types, override)
-				}
+			override_procedure(&v, d.name, types, config)
 
-				if default, has_default := config.procedure_parameter_defaults[param_key]; has_default {
-					p.default = default
-				}
-			}
-
-			return_override_key := d.name
-
-			if override, has_override := config.procedure_type_overrides[return_override_key]; has_override {
-				if override == "[^]" {
-					if ptr_type, is_ptr_type := resolve_type_definition(types, v.result_type, Type_Pointer); is_ptr_type {
-						v.result_type = add_type(types, Type_Multipointer {
-							pointed_to_type = ptr_type.pointed_to_type,
-						})	
-					}	
-				} else {
-					v.result_type = Fixed_Value(override)
-				}
+		case Type_Alias:
+			// This condition is only true for direct typedefs of function types,
+			// since every other typedef is represented as an alias to Type_Name/Fixed_Value.
+			if proc_type := resolve_type_definition_ptr(types, v.aliased_type, Type_Procedure); proc_type != nil {
+				override_procedure(proc_type, d.name, types, config)
 			}
 		}
 	}
@@ -294,7 +278,7 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 	top_code: string
 
 	if config.imports_file != "" {
-		if imports, imports_ok := os.read_entire_file(config.imports_file); imports_ok {
+		if imports, imports_err := os.read_entire_file(config.imports_file, context.allocator); imports_err == nil {
 			top_code = string(imports)
 		}
 	} else if config.import_lib != "" {
@@ -312,10 +296,18 @@ translate_process :: proc(tcr: Translate_Collect_Result, config: Config, types: 
 				return j_is_proc
 			}
 
+			if i.original_line == j.original_line {
+				return i.original_line_sort_tie_breaker < j.original_line_sort_tie_breaker
+			}
+
 			return i.original_line < j.original_line
 		})
 	} else {
 		slice.sort_by(decls[:], proc(i, j: Decl) -> bool {
+			if i.original_line == j.original_line {
+				return i.original_line_sort_tie_breaker < j.original_line_sort_tie_breaker
+			}
+
 			return i.original_line < j.original_line
 		})
 	}
@@ -403,14 +395,12 @@ strip_enum_member_prefixes :: proc(e: ^Type_Enum) {
 		}
 	}
 
-	for &m in e.members {
-		name_without_overlap := m.name[overlap_length:]
+	if overlap_length > 0 {
+		for &m in e.members {
+			name_without_overlap := m.name[overlap_length:]
 
-		if len(name_without_overlap) != 0 {
-			m.name = name_without_overlap
-
-			if is_number(m.name[0]) {
-				m.name = fmt.tprintf("_%v", m.name)
+			if len(name_without_overlap) != 0 {
+				m.name = name_without_overlap
 			}
 		}
 	}
@@ -453,7 +443,6 @@ resolve_final_names :: proc(types: Type_List, decls: Decl_List, config: Config) 
 			}
 
 		case Type_Enum:
-			strip_enum_member_prefixes(&tv)
 
 		case Type_Bit_Set:
 			if type_name, is_type_name := tv.enum_decl_name.(Type_Name); is_type_name {
@@ -489,25 +478,97 @@ resolve_final_names :: proc(types: Type_List, decls: Decl_List, config: Config) 
 	}
 
 	for &d in decls {
-		d.name = final_decl_name(d, types, config)
+		d.name, d.link_name = final_decl_name(d, types, config)
 		
 		switch &def in d.def {
 		case Type_Name: d.def = final_type_name(def, config)
 		case Macro_Name: d.def = final_macro_name(def, config)
 
 		case Fixed_Value:
+			if d.from_macro {
+				s := string(def)
+
+				s = strip_prefix_in_idents(s, config.remove_macro_prefix)
+				s = strip_prefix_in_idents(s, config.remove_type_prefix)
+
+				d.def = Fixed_Value(s)
+			}
+
 		case Type_Index:
 		}
 	}
 }
 
+override_struct :: proc(p: ^Type_Struct, name: string, types: Type_List, config: Config) {
+	if align, has_align := config.struct_align[name]; has_align {
+		p.align = align
+	}
+
+	for &f in p.fields {
+		if len(f.names) != 1 {
+			continue
+		}
+
+		field_key := fmt.tprintf("%s.%s", name, f.names[0])
+		if override, has_override := config.struct_field_overrides[field_key]; has_override {
+			if new_type, ok := augment_pointers(f.type, types, override); ok {
+				f.type = new_type
+			} else if override == "using" {
+				f.is_using = true
+			} else {
+				f.type = Fixed_Value(override)
+			}
+		}
+
+		for &fname in f.names {
+			if new_name, rename := config.rename[fmt.tprintf("%s.%s", name, fname)]; rename {
+				fname = new_name
+			}
+		}
+
+		if proc_type := resolve_type_definition_ptr(types, f.type, Type_Procedure); proc_type != nil {
+			override_procedure(proc_type, field_key, types, config)
+		}
+
+		if struct_type := resolve_type_definition_ptr(types, f.type, Type_Struct); struct_type != nil {
+			override_struct(struct_type, field_key, types, config)
+		}
+
+		if tag, has_tag := config.struct_field_tags[field_key]; has_tag {
+			f.tag = tag
+		}
+	}
+}
+
+override_procedure :: proc(p: ^Type_Procedure, name: string, types: Type_List, config: Config) {
+	for &param, param_idx in p.parameters {
+		param_name := len(param.name) != 0 ? param.name : fmt.tprintf("#%d", param_idx)
+		param_key := fmt.tprintf("%s.%s", name, param_name)
+		if override, has_override := config.procedure_type_overrides[param_key]; has_override {
+			override_procedure_parameter(&param, types, override)
+		} else if proc_type := resolve_type_definition_ptr(types, param.type, Type_Procedure); proc_type != nil {
+			override_procedure(proc_type, param_key, types, config)
+		}
+
+		if default, has_default := config.procedure_parameter_defaults[param_key]; has_default {
+			param.default = default
+		}
+	}
+
+	return_override_key := name
+
+	if override, has_override := config.procedure_type_overrides[return_override_key]; has_override {
+		if new_type, ok := augment_pointers(p.result_type, types, override); ok {
+			p.result_type = new_type
+		} else {
+			p.result_type = Fixed_Value(override)
+		}
+	}
+}
+
 override_procedure_parameter :: proc(p: ^Type_Procedure_Parameter, types: Type_List, override: string) {
-	if override == "[^]" {
-		if ptr_type, is_ptr_type := resolve_type_definition(types, p.type, Type_Pointer); is_ptr_type {
-			p.type = add_type(types, Type_Multipointer {
-				pointed_to_type = ptr_type.pointed_to_type,
-			})	
-		}	
+	if new_type, ok := augment_pointers(p.type, types, override); ok {
+		p.type = new_type
 	} else if override == "#by_ptr" {
 		if ptr_type, is_ptr_type := resolve_type_definition(types, p.type, Type_Pointer); is_ptr_type {
 			p.type = add_type(types, Type_Pointer_By_Ptr {
@@ -519,6 +580,55 @@ override_procedure_parameter :: proc(p: ^Type_Procedure_Parameter, types: Type_L
 	} else {
 		p.type = Fixed_Value(override)
 	}
+}
+
+augment_pointers :: proc(type: Definition, types: Type_List, override: string) -> (Definition, bool) {
+	if override == "" {
+		return type, false
+	}
+
+	is_wrong_type := false
+	new_type := type
+
+	for s := override; s != ""; {
+		if ptr_type, is_ptr_type := resolve_type_definition(types, new_type, Type_Pointer); is_ptr_type {
+			new_type = ptr_type.pointed_to_type
+		} else {
+			is_wrong_type = true
+		}
+
+		if strings.has_prefix(s, "[^]") {
+			s = s[3:]
+		} else if strings.has_prefix(s, "^") {
+			s = s[1:]
+		} else {
+			return type, false
+		}
+	}
+
+	if is_wrong_type {
+		// The caller will replace the entire type with override if ok = false,
+		// but the override certainly tries to simply augment the type.
+		return type, true
+	}
+
+	for s := override; s != ""; {
+		if strings.has_suffix(s, "[^]") {
+			s = s[:len(s) - 3]
+			new_type = add_type(types, Type_Multipointer {
+				pointed_to_type = new_type,
+			})
+		} else if strings.has_suffix(s, "^") {
+			s = s[:len(s) - 1]
+			new_type = add_type(types, Type_Pointer {
+				pointed_to_type = new_type,
+			})
+		} else {
+			return type, false
+		}
+	}
+
+	return new_type, true
 }
 
 is_number :: proc(b: byte) -> bool {
@@ -639,21 +749,27 @@ ensure_name_valid :: proc(s: string) -> string {
 	return s
 }
 
-final_decl_name :: proc(d: Decl, types: Type_List, config: Config) -> string {
+final_decl_name :: proc(d: Decl, types: Type_List, config: Config) -> (name: string, link_name: string) {
 	if d.explicitly_created {
-		return d.name
-	}
-
-	if new_name, rename := config.rename[string(d.name)]; rename {
-		return new_name
+		return d.name, ""
 	}
 
 	_, is_proc := resolve_type_definition(types, d.def, Type_Procedure)
 
+	if new_name, rename := config.rename[string(d.name)]; rename {
+		return new_name, is_proc ? d.name : ""
+	}
+
 	if is_proc {
-		return strings.trim_prefix(d.name, config.remove_function_prefix)
+		has_prefix := strings.has_prefix(d.name, config.remove_function_prefix)
+
+		if !has_prefix {
+			return d.name, d.name
+		}
+
+		return d.name[len(config.remove_function_prefix):], ""
 	} else if d.from_macro {
-		return strings.trim_prefix(d.name, config.remove_macro_prefix)
+		return strings.trim_prefix(d.name, config.remove_macro_prefix), ""
 	} else {
 		res := strings.trim_prefix(d.name, config.remove_type_prefix)
 		res = strings.trim_suffix(res, config.remove_type_suffix)
@@ -662,10 +778,10 @@ final_decl_name :: proc(d: Decl, types: Type_List, config: Config) -> string {
 			res = strings.to_ada_case(res)
 		}
 
-		return res
+		return res, ""
 	}
 
-	return d.name
+	return d.name, ""
 }
 
 final_type_name :: proc(name: Type_Name, config: Config) -> Type_Name {
@@ -754,4 +870,140 @@ extract_top_comment :: proc(src: string) -> string {
 	}
 
 	return ""
+}
+
+is_ident_char :: proc(c: byte) -> bool {
+	return (c >= 'a' && c <= 'z') ||
+	       (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') ||
+	       (c == '_')
+}
+
+is_ident_start :: proc(c: byte) -> bool {
+	return (c >= 'a' && c <= 'z') ||
+	       (c >= 'A' && c <= 'Z') ||
+	       (c == '_')
+}
+
+strip_prefix_in_idents :: proc(s: string, prefix: string) -> string {
+	if len(prefix) == 0 || len(s) == 0 {
+		return s
+	}
+
+	out: [dynamic]byte
+	out = make([dynamic]byte, 0, len(s))
+
+	in_string := false
+	in_char := false
+	in_line_comment := false
+	in_block_comment := false
+	escaped := false
+
+	i := 0
+	for i < len(s) {
+		if in_line_comment {
+			b := s[i]
+			append(&out, b)
+			i += 1
+			if b == '\n' {
+				in_line_comment = false
+			}
+			continue
+		}
+
+		if in_block_comment {
+			if i + 1 < len(s) && s[i] == '*' && s[i+1] == '/' {
+				append(&out, '*')
+				append(&out, '/')
+				i += 2
+				in_block_comment = false
+				continue
+			}
+			append(&out, s[i])
+			i += 1
+			continue
+		}
+
+		if in_string {
+			b := s[i]
+			append(&out, b)
+			i += 1
+
+			if escaped {
+				escaped = false
+				continue
+			}
+
+			if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				in_string = false
+			}
+			continue
+		}
+
+		if in_char {
+			b := s[i]
+			append(&out, b)
+			i += 1
+
+			if escaped {
+				escaped = false
+				continue
+			}
+
+			if b == '\\' {
+				escaped = true
+			} else if b == '\'' {
+				in_char = false
+			}
+			continue
+		}
+
+		if i + 1 < len(s) && s[i] == '/' && s[i+1] == '/' {
+			append(&out, '/')
+			append(&out, '/')
+			i += 2
+			in_line_comment = true
+			continue
+		}
+
+		if i + 1 < len(s) && s[i] == '/' && s[i+1] == '*' {
+			append(&out, '/')
+			append(&out, '*')
+			i += 2
+			in_block_comment = true
+			continue
+		}
+
+		if s[i] == '"' {
+			append(&out, '"')
+			i += 1
+			in_string = true
+			escaped = false
+			continue
+		}
+
+		if s[i] == '\'' {
+			append(&out, '\'')
+			i += 1
+			in_char = true
+			escaped = false
+			continue
+		}
+
+		if i + len(prefix) <= len(s) && s[i:i+len(prefix)] == prefix {
+			prev_ok := (i == 0) || !is_ident_char(s[i-1])
+			next_ok := (i + len(prefix) < len(s)) && is_ident_char(s[i+len(prefix)])
+			if prev_ok && next_ok {
+				i += len(prefix)
+				continue
+			}
+		}
+
+		append(&out, s[i])
+		i += 1
+	}
+
+	return string(out[:])
 }

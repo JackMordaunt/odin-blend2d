@@ -5,9 +5,9 @@
 // will use these types. The outputter does not, and should not, have any knowledge of clang.
 package bindgen2
 
-// A type identifier is either a string or an index that points to another type. The string used to
-// refer to a type just by its name (for example, when a struct field refers to some other type).
-// The index is often used when a struct contains a field of anonymous type.
+// A Definition can be a type name or refer to another type using an index. Fields will often use
+// type names to refer to types while declarations will use type indices to point out how the type
+// actually looks.
 Definition :: union  {
 	Type_Name,
 	Fixed_Value,
@@ -17,9 +17,12 @@ Definition :: union  {
 
 Type_Name :: distinct string
 
+// Used for constants etc
 Fixed_Value :: distinct string
 
+// For referring to other macros (constant values, these will be evaluated in translate_macros)
 Macro_Name :: distinct string
+
 // Just an index into an array of types. Use to point out the definition of another type.
 Type_Index :: distinct int
 
@@ -40,6 +43,9 @@ add_decl :: proc(decls: Decl_List, d: Decl) {
 	append(decls, d)
 }
 
+// A decl is something with a name such as `Cat :: struct { field: int }`. Here the decl has the
+// name Cat. The `def` field will point to a `Type_Index` so that the actual struct definition can
+// be outputted.
 Decl :: struct {
 	name: string,
 
@@ -53,9 +59,13 @@ Decl :: struct {
 
 	original_line: int,
 
+	// When original line is the same, use this to break the tie
+	original_line_sort_tie_breaker: int,
+
 	explicitly_created: bool,
 
-	// TODO can we get these two for all fields
+	// Only used for procs and only if it's not empty.
+	link_name: string,
 
 	// Only used for macros.
 	explicit_whitespace_before_side_comment: int,
@@ -70,6 +80,8 @@ Decl :: struct {
 	from_macro: bool,
 }
 
+// Types such as `Type_Pointer` just refer to other types. Type such as `Type_Struct_Field` contain
+// more info such as: What's the name of the field? etc
 Type :: union #no_nil {
 	Type_Unknown,
 	Type_Pointer,
@@ -120,6 +132,7 @@ Type_Struct_Field :: struct {
 Type_Struct :: struct {
 	fields: []Type_Struct_Field,
 	raw_union: bool,
+	align: int,
 }
 
 Type_Enum_Member :: struct {
@@ -130,8 +143,9 @@ Type_Enum_Member :: struct {
 }
 
 Type_Enum :: struct {
+	// the `u32` in `My_Enum :: enum u32 {}`
 	storage_type: typeid,
-	members: []Type_Enum_Member,
+	members: [dynamic]Type_Enum_Member, // dynamic so we can construct enums from macros
 }
 
 Type_Unknown :: struct {}
@@ -143,6 +157,9 @@ Type_Bit_Set :: struct {
 	enum_type: Type_Index,
 }
 
+// When bit-setifying, there may exist values that are not power-of-two. Those can't be in the
+// bitset because they won't have a unique bit associated with them. They will instead be outputted
+// as separate constants.
 Type_Bit_Set_Constant :: struct {
 	bit_set_type: Type_Index,
 	bit_set_type_name: Type_Name,
@@ -157,6 +174,7 @@ Type_Fixed_Array :: struct {
 Type_Procedure_Parameter :: struct {
 	name: string,
 	type: Definition,
+	comment: string,
 	default: string,
 	any_int: bool,
 }
@@ -176,7 +194,7 @@ Calling_Convention :: enum {
 
 Type_CString :: struct {}
 
-// Hard-coded override containing Odin type text
+// Hard-coded override containing Odin type text, comes from the config file.
 Type_Override :: struct {
 	definition_text: string,
 }

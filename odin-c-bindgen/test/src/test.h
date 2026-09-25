@@ -1,36 +1,12 @@
-#include <stdarg.h>
+#include <stdint.h>
 
-#define TEST unsigned char
+#define FIVE UINT8_C(5)
 
-typedef signed long   Int64;
-typedef unsigned long UInt64;
+#define MAX WINT_MAX
 
-typedef char testType[2];
+#define TEST UINT8_C
 
-typedef void (*myLogImpl)(const char* fmt, ...);
-
-typedef void (myLogImpl2)(const char* fmt, ...);
-
-struct MyVtable {
-  myLogImpl    logger;
-  myLogImpl2*  logger2;
-  myLogImpl*   logger3;
-  myLogImpl2** logger4;
-};
-
-void test1(myLogImpl log);
-
-void test2(myLogImpl2* log);
-
-void test3(myLogImpl* log);
-
-void test4(myLogImpl2** log);
-
-char constArray(const char arr[2]);
-
-char typedef_test(testType arr);
-
-void functionNoProto();
-
-void functionProto(void);
-
+#define FN(x) (x)
+#define FN_ALIAS FN
+#define FN_AA FN_ALIAS
+#define TWO FN_AA(2)

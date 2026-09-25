@@ -1,5 +1,7 @@
-// Never import clang within this file. Resolve any clang-related things in one of the
-// translate_X.odin files.
+// This file takes the processed output from `translate_process.odin` and turns it into an Odin
+// source file. This is done using simple printing.
+//
+// Never import clang within this file. Resolve any clang-related things in translate_collect.odin.
 #+private file
 package bindgen2
 
@@ -55,6 +57,8 @@ output :: proc(types: Type_List, decls: Decl_List, o: Output_Input, filename: st
 		proc_calling_convention: Calling_Convention,
 	}
 
+	// We group things by type, this makes it possible to create nice alignment between the name
+	// and type.
 	current_group: Output_Group
 
 	for &d in decls {
@@ -88,6 +92,8 @@ output :: proc(types: Type_List, decls: Decl_List, o: Output_Input, filename: st
 
 		multiline := strings.contains_rune(rhs, '\n')
 
+		// This check is a bit complicated. It breaks things into separate groups depending on if
+		// the group kind changes, if the proc calling convention changes etc.
 		if kind != current_group.kind ||
 			(kind == .Proc && current_group.proc_calling_convention != proc_type.calling_convention) ||
 			d.comment_before != "" ||
@@ -184,6 +190,11 @@ output :: proc(types: Type_List, decls: Decl_List, o: Output_Input, filename: st
 				}
 			}
 
+			if d.link_name != "" {
+				output_indent(sb, indent)
+				pfln(sb, "@(link_name=\"%s\")", d.link_name)
+			}
+
 			output_indent(sb, indent)
 			text := group_member_texts[i]
 			p(sb, text)
@@ -205,7 +216,7 @@ output :: proc(types: Type_List, decls: Decl_List, o: Output_Input, filename: st
 	p(sb, footer)
 
 	write_err := os.write_entire_file(filename, transmute([]u8)(strings.to_string(builder)))
-	fmt.ensuref(write_err == true, "Failed writing %v", filename)
+	fmt.ensuref(write_err == nil, "Failed writing %v", filename)
 }
 
 output_indent :: proc(b: ^strings.Builder, indent: int) {
@@ -247,8 +258,14 @@ output_struct_definition :: proc(types: ^[dynamic]Type, idx: Type_Index, b: ^str
 		p(b, " #raw_union")
 	}
 
+	if t_struct.align != 0 {
+		pf(b, " #align(%v)", t_struct.align)
+	}
+
 	pln(b, " {")
 
+	// Struct fields are grouped by comment. If there is a comment before a line then all the lines
+	// after it without a comment before that line will be grouped together.
 	current_group: Struct_Fields_Group
 	first_field := true
 
@@ -533,6 +550,11 @@ output_procedure_signature :: proc(types: ^[dynamic]Type, tp: Type_Procedure, b:
 		if param.default != "" {
 			pf(b, " = %v", param.default)
 		}
+		
+		if len(param.comment) > 0 {
+			p(b, " ")
+			p(b, param.comment)
+		}
 	}
 
 	if tp.is_variadic {
@@ -602,7 +624,7 @@ parse_type_build :: proc(types: ^[dynamic]Type, idx: Type_Index, b: ^strings.Bui
 			return
 		}
 
-		pf(b, "bit_set[%v; i32]", enum_name)
+		pf(b, "bit_set[%v; %v]", enum_name, types[tv.enum_type].(Type_Enum).storage_type)
 
 	case Type_Bit_Set_Constant:
 		bit_set_type, bit_set_type_ok := resolve_type_definition(types, tv.bit_set_type, Type_Bit_Set)
@@ -610,26 +632,34 @@ parse_type_build :: proc(types: ^[dynamic]Type, idx: Type_Index, b: ^strings.Bui
 		if !bit_set_type_ok {
 			return
 		}
+		
+		if tv.value == 0 {
+			pf(b, `%v {{}}`, tv.bit_set_type_name)
+			return
+		}
 
-		pf(b, `%v {{`, tv.bit_set_type_name)
+		v := strings.builder_make()
+		pf(&v, `%v {{`, tv.bit_set_type_name)
 
 		enum_type, enum_type_ok := resolve_type_definition(types, bit_set_type.enum_type, Type_Enum)
 
+		value := tv.value
 		if enum_type_ok {
-			first_printed := false
 			for &m in enum_type.members {
-				if (1 << uint(m.value)) & tv.value != 0 {
-					if first_printed == true {
-						p(b, ", ")
-					} else {
-						first_printed = true
-					}
-
-					pf(b, ".%v", m.name)
+				if bit := 1 << uint(m.value); bit & tv.value != 0 {
+					pf(&v, ".%v, ", m.name)
+					value -= bit
 				}
 			}
 		}
-	
-		p(b, "}")
+
+		if value == 0 {
+			str := strings.to_string(v)
+			p(b, str[:len(str) - 2]) // Drop trailing comma and space
+			p(b, "}")
+		} else {
+			storage_type := types[types[tv.bit_set_type].(Type_Bit_Set).enum_type].(Type_Enum).storage_type
+			pf(b, "transmute(%s)%v(%v)", tv.bit_set_type_name, storage_type, tv.value)
+		}
 	}
 }

@@ -58,9 +58,17 @@ Config :: struct {
 	// Put these tags on the specified struct field
 	struct_field_tags: map[string]string,
 
+	// Adds #align(number) to the outputted struct
+	struct_align: map[string]int,
+
 	// Remove a specific enum member. Write the C name of the member. You can also use wildcards
 	// such as *_Count
 	remove_enum_members: []string,
+
+	// Enums automatically have any prefix that is sharred by all members removed. This sometimes
+	// misbehaves for certain names. Use this setting to manually set the perfix to remove for a
+	// certain enum type.
+	remove_enum_member_prefix: map[string]string,
 
 	// Overrides the type of a procedure parameter or return value. For a parameter use the key
 	// Proc_Name.parameter_name. For a return value use the key Proc_Name.
@@ -72,11 +80,17 @@ Config :: struct {
 	// write the plain-text Odin value as value.
 	//
 	// You can also add defaults for proc parameters within structs. In that case you do:
-	// `Struct_Name.proc_field.parameter_name` -- This does not currently support nested structs.
+	// `Struct_Name.proc_field.parameter_name`
 	procedure_parameter_defaults: map[string]string,
 
 	// Put the names of declarations in here to remove them.	
 	remove: []string,
+
+	// Used to deanonymize an enum.
+	deanon_enums: map[string]string,
+
+	// Group all macros with a prefix into an enum.
+	enumify_macros: map[string]string,
 
 	// Group all procedures at the end of the file.
 	procedures_at_end: bool,
