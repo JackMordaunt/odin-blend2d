@@ -2,8 +2,24 @@
 
 set -xeu
 
+cmake_flags=(-DCMAKE_BUILD_TYPE=Release -DBLEND2D_STATIC=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
+
+# On Windows, build with clang-cl since MSVC hits an internal compiler error on
+# the AVX2 deflate decoder. Link the static CRT to match what Odin links.
+# Use ninja.exe explicitly, as some ninja wrappers on PATH (e.g. depot_tools)
+# can't be run by CMake.
+if [[ "$(uname)" == MINGW* || "$(uname)" == MSYS* ]]; then
+  cmake_flags+=(
+    -G Ninja
+    -DCMAKE_MAKE_PROGRAM="$(command -v ninja.exe)"
+    -DCMAKE_C_COMPILER=clang-cl
+    -DCMAKE_CXX_COMPILER=clang-cl
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+  )
+fi
+
 # Build blend2d static lib.
-cmake -S blend2d -B .build -DCMAKE_BUILD_TYPE=Release -DBLEND2D_STATIC=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake -S blend2d -B .build "${cmake_flags[@]}"
 cmake --build .build --config Release --parallel 4
 
 # Copy public headers (blend2d uses _p to indicate "private").
